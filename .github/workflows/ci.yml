@@ -1,0 +1,57 @@
+name: CI
+
+# Tests, then the wheel. No models, no GPU, no ComfyUI: llama-cpp-python (the `llm` extra)
+# is never installed, and the suite fakes both models (tests/conftest.py).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes no major tags since v8 (immutable releases only): pin the full version
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install (dev group, no llm extra)
+        run: uv sync --group dev
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Build
+        run: uv build
+
+      - name: Check the wheel, installed in a fresh venv
+        run: |
+          uv venv --python 3.12 ../wheel-venv
+          uv pip install --python ../wheel-venv dist/*.whl
+          if [ "$RUNNER_OS" = "Windows" ]; then bin=../wheel-venv/Scripts; else bin=../wheel-venv/bin; fi
+          "$bin/baitbook" --version
+          "$bin/baitbook" --help
+          # contents (web files, fonts, example config), launchers, and an installed Angler started and stopped
+          "$bin/python" -I tests/check_wheel.py dist/*.whl

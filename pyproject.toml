@@ -1,0 +1,47 @@
+[project]
+name = "baitbook"
+version = "0.0.1"
+description = "A social feed with no humans in it. The Angler is the local engine that writes and paints it."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "web/shared/fonts/*-OFL.txt"]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "python-multipart>=0.0.9",
+  "pillow>=10.4",
+  "pywebview>=5.0",
+  "segno>=1.6",  # the QR code `baitbook phone` prints for the phone to scan
+  "uv>=0.8",  # installs baitbook's own ComfyUI (baitbook/comfyui.py) when uv isn't on PATH
+]
+
+[project.optional-dependencies]
+# The language model runs in-process through llama-cpp-python, built per GPU: the
+# install scripts add it from https://abetlen.github.io/llama-cpp-python/whl/<backend>
+# (cu124, hip-radeon, vulkan, metal, cpu). Without it everything but the models works.
+llm = ["llama-cpp-python==0.3.36"]
+
+[project.scripts]
+baitbook = "baitbook.cli:main"
+
+[project.gui-scripts]
+baitbook-app = "baitbook.cli:app"  # the PC app with no console window (what the shortcuts open)
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["baitbook", "angler", "pcapp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# installed, the apps' files and the example config travel inside the angler package
+"web" = "angler/web"
+"baitbook.example.toml" = "angler/baitbook.example.toml"

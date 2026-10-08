@@ -1,0 +1,82 @@
+# baitbook — the Angler's config. Copied to baitbook.toml on the first run;
+# edit that copy (it's ignored by git). Everything here can also be changed from
+# the PC app (Settings), which writes the file back. Paths can be absolute or
+# relative to this file.
+
+[server]
+host = "0.0.0.0"              # 0.0.0.0 so phones on your Wi-Fi can dock; "127.0.0.1" if they only come through tailscale serve
+port = 8787
+# The phone app needs HTTPS to work offline. Best: leave these empty and put the
+# Angler behind `tailscale serve` (`baitbook phone`; README, "Put it on your phone"). Or point them at
+# a cert + key the phone trusts (mkcert, `tailscale cert`, ...) and the Angler
+# serves HTTPS on `port` itself.
+ssl_certfile = ""
+ssl_keyfile = ""
+local_port = 8788             # with HTTPS on: plain HTTP on 127.0.0.1 only, for the PC app on this machine
+
+[text]
+# The language + vision model, run in-process by llama-cpp-python. Default: Google's
+# Gemma 4 31B QAT GGUF, https://huggingface.co/google/gemma-4-31B-it-qat-q4_0-gguf
+# (gemma-4-31B_q4_0-it.gguf, 17.7 GB, and gemma-4-31B-it-mmproj.gguf, 1.2 GB).
+# Any Gemma 4 GGUF and its mmproj work (another size or quantization). Other model
+# families don't: baitbook uses llama-cpp-python's Gemma 4 chat handler.
+name = "Gemma 4 31B"
+model = ""                    # path to the GGUF (`baitbook setup` asks for it)
+mmproj = ""                   # path to its vision projector (mmproj) GGUF
+n_ctx = 16384
+n_batch = 576                 # Gemma 4 decodes an image in one micro-batch: 560 image tokens + 16
+n_gpu_layers = -1
+swa_full = false              # keep only the sliding window's KV, not the whole context
+temperature = 1.0             # tested sampling for Gemma 4
+top_p = 0.95
+top_k = 64
+min_p = 0.05
+repeat_penalty = 1.1
+read_temperature = 0.4        # the vision read is description, not invention
+
+[image]
+# The image model, run through ComfyUI (started automatically if it isn't up).
+# Default: FLUX.2 [klein] 4B (Apache 2.0). The model is in Black Forest Labs' repo,
+# https://huggingface.co/black-forest-labs/FLUX.2-klein-4B (flux-2-klein-4b.safetensors,
+# into ComfyUI/models/diffusion_models); the text encoder and VAE ComfyUI needs are in
+# https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b (split_files/:
+# qwen_3_4b.safetensors into models/text_encoders, flux2-vae.safetensors into models/vae).
+# klein 9B works too (non-commercial licence; it has its own text encoder), and .gguf files
+# load through ComfyUI-GGUF. Other image models don't: the ComfyUI graph
+# (angler/workflows/klein_i2i.json) is built for FLUX.2 [klein].
+name = "FLUX.2 [klein] 4B"
+comfy_url = "http://127.0.0.1:8188"
+comfy_dir = ""                # the ComfyUI folder (the one with main.py); `baitbook comfyui` installs one
+comfy_python = ""             # the Python of ComfyUI's environment (python.exe on Windows)
+comfy_base = ""               # ComfyUI's --base-directory (models, custom nodes, outputs); empty = comfy_dir
+comfy_autostart = true
+unet = "flux-2-klein-4b.safetensors"      # file names inside ComfyUI's model folders
+text_encoder = "qwen_3_4b.safetensors"
+vae = "flux2-vae.safetensors"
+width = 1024                  # output size: 1:1 by default
+height = 1024
+steps = 4
+cfg = 1.0
+reference_megapixels = 1.0
+tiled_decode = true
+tile_size = 512
+primer_file = ""              # empty = the built-in FLUX.2 [klein] primer
+
+[shift]
+posts_per_resident = 5
+good_examples = 5             # random bites per resident per night
+bad_examples = 3              # random throw-backs per resident per night; 0 = leave bad examples out
+variation = "bold"            # how far an edit moves from its source: subtle | bold | wild
+schedule_enabled = true
+schedule_time = "03:00"       # local time, 24h
+catch_up_hours = 6.0          # slept through schedule_time (or the Angler was off)? run it when back within this many hours; 0 = skip that night
+
+[device]
+keep_nights = 7               # how many nights of posts a phone keeps
+
+[app]
+# The PC app connects to an Angler. Empty = the one on this machine (started
+# in the background if it isn't running). Or point it at another machine's
+# Angler, e.g. "http://192.168.1.20:8787": the first time, it asks for that
+# Angler's pairing code and pairs as the owner.
+angler_url = ""

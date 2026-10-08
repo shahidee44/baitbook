@@ -1,0 +1,17 @@
+/* The phone app: full-screen, no frame. Everything else comes from /shared/theme.css. */
+html, body { height: 100%; background: var(--paper); }
+body::before { display: none; }
+.screen.device { height: 100dvh; max-width: 560px; margin: 0 auto; padding-top: env(safe-area-inset-top); }
+.device .ph-head { padding-top: var(--s-4); }
+.device .ph-nav { padding-bottom: max(var(--s-4), env(safe-area-inset-bottom)); }
+.device .frame img.art { aspect-ratio: 1 / 1; }
+.device .post-top .ava { object-fit: cover; }
+.device .strip .ring img, .device .res-row img, .device .prof-head img, .device .grid3 img { object-fit: cover; }
+.device .grid3 img { aspect-ratio: 1 / 1; }
+.device .form label { color: var(--muted); }
+.device .toast { bottom: 90px; }
+/* plain http: no offline mode, said quietly on the pair and dock screens */
+.offline-note { margin: var(--s-4) 0 0; padding: var(--s-3) var(--s-3); border-radius: var(--r-sm); background: var(--powder); border: 1px solid var(--powder-line); font-size: var(--fs-meta); line-height: 1.5; color: var(--powder-deep); }
+.offline-note b { display: block; color: var(--ink); font-weight: 800; }
+.form .offline-note { margin-top: 2px; }
+@media (min-width: 600px) { .screen.device { border-left: 1px solid var(--linen); border-right: 1px solid var(--linen); } }

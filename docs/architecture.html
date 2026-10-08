@@ -1,0 +1,1325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>baitbook — how the engine and its apps are put together</title>
+<!--
+  A self-contained architecture guide: no network, no build. Open it straight from disk.
+  The diagrams are drawn by the small script below from plain specs placed right after each figure, so a
+  diagram is edited where it is read. Coordinates are in each diagram's own viewBox units.
+  If a box here disagrees with the code, the code wins: fix the box.
+-->
+<style>
+  :root {
+    --ink: #1d232c; --muted: #5d6878; --line: #d9dee6; --bg: #fbfbfc; --panel: #ffffff; --accent: #c0451f;
+    --code: #f2f4f7; --nav: #f4f5f7;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 12px; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  nav { position: fixed; top: 0; left: 0; bottom: 0; width: 250px; overflow-y: auto; background: var(--nav);
+        border-right: 1px solid var(--line); padding: 18px 14px 40px; font-size: 13.5px; }
+  nav .brand { font-weight: 700; font-size: 15px; margin: 0 0 2px; }
+  nav .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  nav a { display: block; color: var(--ink); text-decoration: none; padding: 3px 8px; border-radius: 5px; }
+  nav a:hover { background: #e6e9ee; }
+  nav a.l2 { padding-left: 20px; color: var(--muted); font-size: 12.5px; }
+  nav .part { margin: 14px 0 4px 8px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  main { margin-left: 250px; padding: 28px 44px 80px; max-width: 1180px; }
+  h1 { font-size: 30px; margin: 0 0 4px; letter-spacing: -.01em; }
+  h1 + .lede { color: var(--muted); font-size: 16px; margin: 0 0 22px; }
+  h2 { font-size: 23px; margin: 54px 0 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+  h3 { font-size: 17.5px; margin: 30px 0 6px; }
+  h4 { font-size: 15px; margin: 20px 0 4px; }
+  p, li { max-width: 860px; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font: 13px/1.4 "Cascadia Code", Consolas, monospace; }
+  pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; font: 12.5px/1.5 "Cascadia Code", Consolas, monospace; max-width: 900px; }
+  pre code { background: none; padding: 0; }
+  code, pre { font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
+  figure { margin: 18px 0 26px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 14px 8px; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { color: var(--muted); font-size: 13px; padding: 8px 4px 2px; max-width: 900px; }
+  .callout { border-left: 4px solid var(--accent); background: #fff4ef; padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 16px 0; max-width: 880px; }
+  .callout.info { border-color: #2f6fb3; background: #eef4fb; }
+  table { border-collapse: collapse; margin: 12px 0 20px; font-size: 14px; max-width: 920px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 6px 12px 6px 0; text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; }
+  td code { white-space: nowrap; }
+  td.wrap code { white-space: normal; }
+  details { margin: 10px 0 16px; max-width: 900px; }
+  summary { cursor: pointer; color: #2f5f9a; font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12.5px; color: var(--muted); margin: 10px 0 0; }
+  .legend span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px;
+                         vertical-align: -2px; background: var(--f); border: 1.5px solid var(--s); }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; border: 1px solid rgba(0,0,0,.15); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1000px) { nav { display: none; } main { margin-left: 0; padding: 20px; } .grid2 { grid-template-columns: 1fr; } }
+</style>
+<script>
+/**
+ * The diagram engine. D(id, spec) draws a box-and-arrow diagram into <svg id>; S(id, spec) draws a sequence diagram.
+ *
+ * A box-and-arrow spec: { w, h, groups: [{x,y,w,h,t}], nodes: [{id,x,y,w,h,t,s,k,shape,href}], edges: [{f,t,l,d,b,via,lo}] }
+ *   node: t = title, s = smaller lines ("\n" between), k = kind (the colour), shape = box | pill | cyl | note
+ *   edge: f/t = node ids, optionally with a port ("a:r", "b:t", "c:b.25" = bottom, a quarter of the way along),
+ *         l = label, d = dashed, b = bend in px (a curve), via = [[x,y], ...] corner points, lo = label offset [dx,dy]
+ */
+const KIND = {
+  api:    ['#fff3d1', '#b8860b'], engine: ['#f2eafc', '#7a4fb5'], llm:    ['#e0f4f5', '#13808a'],
+  image:  ['#f3ece4', '#8a6440'], store:  ['#fffbe0', '#9a8400'], config: ['#edf1f7', '#5b6b86'],
+  pc:     ['#fbe8f3', '#a83c78'], device: ['#e5f4ea', '#2e7d4f'], shared: ['#fff0df', '#c06a00'],
+  trust:  ['#fde9e9', '#b43c3c'], ext:    ['#efefef', '#7a7a7a'], st:     ['#eaf1ff', '#3767b5'],
+  dev:    ['#eef0f3', '#6b7686'], note:   ['#fffde8', '#c9b458'], plain:  ['#ffffff', '#8b95a5'],
+};
+const D = (() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const measure = document.createElement('canvas').getContext('2d');
+  const FONT = '"Segoe UI", system-ui, sans-serif';
+  const widthOf = (s, px, weight = 400) => { measure.font = `${weight} ${px}px ${FONT}`; return measure.measureText(s).width; };
+  const mk = (tag, attrs = {}, parent = null) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+  /** Where the line from n's centre toward (tx, ty) leaves n's box. */
+  function anchor(n, tx, ty) {
+    const cx = n.x + n.w / 2, cy = n.y + n.h / 2, dx = tx - cx, dy = ty - cy;
+    if (!dx && !dy) return [cx, cy];
+    const s = Math.min(dx ? (n.w / 2) / Math.abs(dx) : Infinity, dy ? (n.h / 2) / Math.abs(dy) : Infinity);
+    return [cx + dx * s, cy + dy * s];
+  }
+  /** "id:side.frac" -> a point on that side of the node, or null without a port. */
+  function port(n, p) {
+    if (!p) return null;
+    const side = p[0], f = p.length > 1 ? parseFloat(p.slice(1)) : 0.5;
+    if (side === 'l') return [n.x, n.y + n.h * f];
+    if (side === 'r') return [n.x + n.w, n.y + n.h * f];
+    if (side === 't') return [n.x + n.w * f, n.y];
+    return [n.x + n.w * f, n.y + n.h];
+  }
+  const marker = (svg, defs, colour) => {
+    const id = `ah-${svg.id}-${colour.replace('#', '')}`;
+    if (!svg.querySelector(`#${id}`)) {
+      const m = mk('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs);
+      mk('path', { d: 'M0,0 L10,5 L0,10 z', fill: colour }, m);
+    }
+    return `url(#${id})`;
+  };
+  function lines(g, x, y, list, px, colour, weight = 400, anchorTo = 'middle') {
+    const lh = px * 1.28;
+    list.forEach((s, i) => {
+      const t = mk('text', { x, y: y + i * lh, 'font-size': px, 'font-weight': weight, fill: colour, 'text-anchor': anchorTo, 'font-family': FONT }, g);
+      t.textContent = s;
+    });
+    return list.length * lh;
+  }
+  function label(g, x, y, text, colour = '#3b4350') {
+    const parts = String(text).split('\n'), px = 11.5, w = Math.max(...parts.map(p => widthOf(p, px))) + 10, h = parts.length * px * 1.28 + 4;
+    mk('rect', { x: x - w / 2, y: y - h / 2, width: w, height: h, rx: 4, fill: '#ffffff', 'fill-opacity': 0.92 }, g);
+    lines(g, x, y - h / 2 + px + 1, parts, px, colour);
+  }
+  function node(svg, g, n) {
+    const [fill, stroke] = KIND[n.k || 'plain'];
+    const wrap = n.href ? mk('a', { href: n.href }, g) : g;
+    const shape = n.shape || 'box';
+    if (shape === 'cyl') {
+      const e = 9;
+      mk('path', { d: `M${n.x},${n.y + e} a${n.w / 2},${e} 0 0 1 ${n.w},0 v${n.h - 2 * e} a${n.w / 2},${e} 0 0 1 ${-n.w},0 z`, fill, stroke, 'stroke-width': 1.6 }, wrap);
+      mk('path', { d: `M${n.x},${n.y + e} a${n.w / 2},${e} 0 0 0 ${n.w},0`, fill: 'none', stroke, 'stroke-width': 1.6 }, wrap);
+    } else {
+      const rx = shape === 'pill' ? Math.min(n.h / 2, 22) : shape === 'note' ? 3 : 8;
+      mk('rect', { x: n.x, y: n.y, width: n.w, height: n.h, rx, fill, stroke, 'stroke-width': 1.6,
+                   'stroke-dasharray': shape === 'note' ? '4 3' : 'none' }, wrap);
+    }
+    const sub = n.s ? String(n.s).split('\n') : [];
+    const tpx = n.tpx || 13.5, spx = n.spx || 11.5;
+    const title = n.t ? String(n.t).split('\n') : [];
+    const total = title.length * tpx * 1.28 + (sub.length ? 3 + sub.length * spx * 1.28 : 0);
+    // `ta: 'top'` puts the text at the top of the box, for a box that holds other boxes.
+    let y = n.ta === 'top' ? n.y + tpx + 9 : n.y + n.h / 2 - total / 2 + tpx * 0.95 + (shape === 'cyl' ? 4 : 0);
+    const cx = n.x + n.w / 2;
+    y += lines(wrap, cx, y, title, tpx, '#1d232c', 650);
+    if (sub.length) lines(wrap, cx, y + 3 - tpx * 0.28 + spx * 0.28, sub, spx, '#4c5666');
+    if (n.href) wrap.style.cursor = 'pointer';
+  }
+  function draw(id, spec) {
+    const svg = document.getElementById(id);
+    svg.setAttribute('viewBox', `0 0 ${spec.w} ${spec.h}`);
+    svg.setAttribute('role', 'img');
+    const defs = mk('defs', {}, svg);
+    const gGroups = mk('g', {}, svg), gEdges = mk('g', {}, svg), gNodes = mk('g', {}, svg), gLabels = mk('g', {}, svg);
+    for (const gr of spec.groups || []) {
+      mk('rect', { x: gr.x, y: gr.y, width: gr.w, height: gr.h, rx: 12, fill: gr.fill || '#f7f8fa', stroke: gr.stroke || '#b9c1cc', 'stroke-dasharray': '6 4', 'stroke-width': 1.3 }, gGroups);
+      if (gr.t) lines(gGroups, gr.x + 12, gr.y + 17, [gr.t], 12, gr.colour || '#5d6878', 600, 'start');
+    }
+    const byId = {};
+    for (const n of spec.nodes || []) byId[n.id] = n;
+    for (const e of spec.edges || []) {
+      const [fid, fp] = e.f.split(':'), [tid, tp] = e.t.split(':');
+      const a = byId[fid], b = byId[tid];
+      if (!a || !b) { console.warn('diagram', id, 'edge to nowhere', e); continue; }
+      const colour = e.c || '#5f6b7d';
+      const ac = [a.x + a.w / 2, a.y + a.h / 2], bc = [b.x + b.w / 2, b.y + b.h / 2];
+      let d, mid;
+      if (e.via?.length) {
+        const p0 = port(a, fp) || anchor(a, ...e.via[0]), p1 = port(b, tp) || anchor(b, ...e.via[e.via.length - 1]);
+        const pts = [p0, ...e.via, p1];
+        d = 'M' + pts.map(p => p.join(',')).join(' L');
+        const k = Math.floor((pts.length - 1) / 2), q = pts[k], r = pts[k + 1];
+        mid = [(q[0] + r[0]) / 2, (q[1] + r[1]) / 2];
+      } else if (e.b) {
+        const mx = (ac[0] + bc[0]) / 2, my = (ac[1] + bc[1]) / 2, dx = bc[0] - ac[0], dy = bc[1] - ac[1], len = Math.hypot(dx, dy) || 1;
+        const ctl = [mx - dy / len * e.b, my + dx / len * e.b];
+        const p0 = port(a, fp) || anchor(a, ...ctl), p1 = port(b, tp) || anchor(b, ...ctl);
+        d = `M${p0} Q${ctl} ${p1}`;
+        mid = [0.25 * p0[0] + 0.5 * ctl[0] + 0.25 * p1[0], 0.25 * p0[1] + 0.5 * ctl[1] + 0.25 * p1[1]];
+      } else {
+        const p0 = port(a, fp) || anchor(a, ...(port(b, tp) || bc)), p1 = port(b, tp) || anchor(b, ...(port(a, fp) || ac));
+        d = `M${p0} L${p1}`;
+        mid = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2];
+      }
+      const path = mk('path', { d, fill: 'none', stroke: colour, 'stroke-width': e.wd || 1.6, 'marker-end': e.none ? '' : marker(svg, defs, colour) }, gEdges);
+      if (e.d) path.setAttribute('stroke-dasharray', '6 4');
+      if (e.two) path.setAttribute('marker-start', marker(svg, defs, colour));
+      if (e.l) label(gLabels, mid[0] + (e.lo?.[0] || 0), mid[1] + (e.lo?.[1] || 0), e.l, colour === '#5f6b7d' ? '#3b4350' : colour);
+    }
+    for (const n of spec.nodes || []) node(svg, gNodes, n);
+    for (const t of spec.texts || []) lines(gLabels, t.x, t.y, String(t.t).split('\n'), t.px || 12, t.c || '#5d6878', t.wt || 400, t.a || 'start');
+  }
+  /** A sequence diagram: { w, actors: [{id, t, k}], steps: [{f, t, l, d} | {note, over: [a, b]} | {gap}] } */
+  function seq(id, spec) {
+    const svg = document.getElementById(id), w = spec.w || 1000, top = 20, head = 48, row = spec.row || 38;
+    const defs = mk('defs', {}, svg), g = mk('g', {}, svg);
+    const n = spec.actors.length, lane = (w - 40) / n, x = {};
+    spec.actors.forEach((a, i) => { x[a.id] = 20 + lane * i + lane / 2; });
+    let y = top + head + 26;
+    const body = mk('g', {}, svg);
+    for (const s of spec.steps) {
+      if (s.gap) { y += s.gap; continue; }
+      if (s.note) {
+        const [a, b] = s.over || [s.at, s.at], x0 = Math.min(x[a], x[b]) - lane * 0.42, x1 = Math.max(x[a], x[b]) + lane * 0.42;
+        const parts = String(s.note).split('\n'), h = parts.length * 15 + 10;
+        mk('rect', { x: x0, y: y - 14, width: x1 - x0, height: h, rx: 5, fill: KIND.note[0], stroke: KIND.note[1] }, body);
+        lines(body, (x0 + x1) / 2, y + 1, parts, 11.5, '#5b5320');
+        y += h + 10; continue;
+      }
+      const colour = s.c || '#4d5869', x0 = x[s.f], x1 = x[s.t];
+      if (s.f === s.t) {
+        // A message to itself loops out to the right, or to the left when its words would run off the right edge.
+        const parts = String(s.l).split('\n'), wide = Math.max(...parts.map(p => widthOf(p, 11.5)));
+        const left = x0 + 52 + wide > w - 8, dir = left ? -1 : 1;
+        mk('path', { d: `M${x0},${y} h${46 * dir} v16 h${-44 * dir}`, fill: 'none', stroke: colour, 'stroke-width': 1.5, 'marker-end': marker(svg, defs, colour), 'stroke-dasharray': s.d ? '5 4' : 'none' }, body);
+        lines(body, x0 + 52 * dir, y + 12, parts, 11.5, '#2f3640', 400, left ? 'end' : 'start');
+        y += row + 8 + (parts.length - 1) * 15; continue;
+      }
+      // A label of several lines takes its extra room above the arrow, clear of the step before.
+      const parts = String(s.l).split('\n'), extra = (parts.length - 1) * 14;
+      y += extra;
+      mk('line', { x1: x0, y1: y, x2: x1 + (x1 > x0 ? -2 : 2), y2: y, stroke: colour, 'stroke-width': 1.5, 'marker-end': marker(svg, defs, colour), 'stroke-dasharray': s.d ? '5 4' : 'none' }, body);
+      lines(body, (x0 + x1) / 2, y - 6 - extra, parts, 11.5, '#2f3640');
+      y += row;
+    }
+    const h = y + 10;
+    for (const a of spec.actors) {
+      mk('line', { x1: x[a.id], y1: top + head, x2: x[a.id], y2: h - 4, stroke: '#c3cad4', 'stroke-dasharray': '4 4' }, g);
+      const [fill, stroke] = KIND[a.k || 'plain'], bw = Math.min(lane - 14, 190);
+      mk('rect', { x: x[a.id] - bw / 2, y: top, width: bw, height: head, rx: 8, fill, stroke, 'stroke-width': 1.6 }, g);
+      const tl = String(a.t).split('\n');
+      lines(g, x[a.id], top + head / 2 - (tl.length - 1) * 8 + 5, tl, 13, '#1d232c', 650);
+    }
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  }
+  return Object.assign(draw, { seq });
+})();
+const S = D.seq;
+</script>
+</head>
+<body>
+<nav>
+  <div class="brand">baitbook</div>
+  <div class="sub">How it is put together</div>
+  <div class="part">The whole</div>
+  <a href="#overview">1. The big picture</a>
+  <a href="#layers">2. Inside the Angler</a>
+  <a href="#repo">3. Where things live</a>
+  <div class="part">Starting up</div>
+  <a href="#boot">4. Boot</a>
+  <div class="part">The engine</div>
+  <a href="#worker">5. One worker, one GPU job</a>
+  <a href="#read">6. A resident is born</a>
+  <a href="#shift">7. A night shift, end to end</a>
+  <a href="#shift-stages" class="l2">What the apps see</a>
+  <a href="#context">8. Sources, examples, chains</a>
+  <a href="#snags" class="l2">Bites, throw-backs and snags</a>
+  <a href="#prompts">9. The prompts</a>
+  <a href="#variation" class="l2">How far an edit moves</a>
+  <div class="part">The models</div>
+  <a href="#llm">10. The language model</a>
+  <a href="#image">11. The image model</a>
+  <a href="#own-comfy" class="l2">baitbook's own ComfyUI</a>
+  <a href="#get-models" class="l2">Downloading the models</a>
+  <a href="#image-graph" class="l2">The i2i graph</a>
+  <a href="#gpu">12. GPU memory: the series rule</a>
+  <div class="part">What it keeps</div>
+  <a href="#storage">13. Storage</a>
+  <a href="#config">14. Configuration</a>
+  <a href="#home" class="l2">The home folder</a>
+  <div class="part">The API</div>
+  <a href="#api">15. The HTTP API</a>
+  <a href="#trust">16. Trust and pairing</a>
+  <div class="part">The clients</div>
+  <a href="#pcapp">17. The PC app</a>
+  <a href="#device">18. The phone app</a>
+  <a href="#dock">19. Docking, end to end</a>
+  <a href="#reef">20. The Reef</a>
+  <div class="part">Around the Angler</div>
+  <a href="#schedule">21. The schedule</a>
+  <a href="#tests">22. Tests</a>
+  <a href="#logs">23. Logs and diagnostics</a>
+  <a href="#glossary">Glossary</a>
+</nav>
+<main>
+<h1>How baitbook is put together</h1>
+<p class="lede">A guide to the Angler (the engine on the PC) and the two apps that talk to it, from the whole system down to a single prompt turn. Every box names the file or function it stands for, so you can jump from a diagram straight into the code.</p>
+
+<div class="legend">
+  <span style="--f:#fff3d1;--s:#b8860b">server.py, __main__.py: the API</span>
+  <span style="--f:#f2eafc;--s:#7a4fb5">engine.py</span>
+  <span style="--f:#e0f4f5;--s:#13808a">llm.py, prompts.py</span>
+  <span style="--f:#f3ece4;--s:#8a6440">imagegen.py, ComfyUI</span>
+  <span style="--f:#fffbe0;--s:#9a8400">db.py, media.py, data/</span>
+  <span style="--f:#edf1f7;--s:#5b6b86">config.py, baitbook.toml</span>
+  <span style="--f:#fbe8f3;--s:#a83c78">web/app/, pcapp/</span>
+  <span style="--f:#e5f4ea;--s:#2e7d4f">web/device/</span>
+  <span style="--f:#fff0df;--s:#c06a00">web/shared/</span>
+  <span style="--f:#fde9e9;--s:#b43c3c">pairing, tokens</span>
+  <span style="--f:#efefef;--s:#7a7a7a">outside the repository</span>
+  <span style="--f:#eaf1ff;--s:#3767b5">a state</span>
+</div>
+
+<!-- ============================================================ 1 -->
+<h2 id="overview">1. The big picture</h2>
+<p>baitbook is a social feed with no humans in it. Every "user" is a <b>resident</b> the owner creates from 5 images, and every post after those 5 is an image-to-image edit of an older image. The owner <b>bites</b> or <b>throws back</b> each post, and those votes steer what gets made next. There are three programs:</p>
+<ul>
+  <li><b>The Angler</b> (<code>angler/</code>, Python): the engine and the only server. One process runs the HTTP API, serves both apps' files, and owns the language model in-process through llama-cpp-python. It drives the image model through a ComfyUI server that it starts and stops itself: baitbook's own (<code>baitbook comfyui</code>, <a href="#own-comfy">section 11</a>) or one the user already has. <code>baitbook angler</code> runs it in a console; the PC app starts it in the background.</li>
+  <li><b>The PC app</b> (<code>web/app/</code>, opened in a native window by <code>pcapp/</code>, which the <code>baitbook</code> command runs): the owner's console and an online feed. It talks to the Angler directly; votes land the moment they are cast.</li>
+  <li><b>The phone app</b> (<code>web/device/</code>): an installable web app that keeps its posts, images and votes in IndexedDB. It works with no network and <b>docks</b> with the Angler to send votes home and fetch the last 7 nights.</li>
+  <li><b>Not in the repository:</b> the model files (Gemma 4 31B and its mmproj; klein 4B's files in ComfyUI's model folders; <code>baitbook models</code> downloads them), the ComfyUI install and its Python environment (<code>baitbook comfyui</code> puts one in the home folder), and the <b>home folder</b>, which holds <code>baitbook.toml</code> and <code>data/</code>, and <code>comfyui/</code> and <code>models/</code> once those two commands have run (<a href="#home">section 14</a>). <code>baitbook.toml</code> points at the models and ComfyUI.</li>
+</ul>
+<figure><svg id="d-big"></svg>
+<figcaption>The three programs and what they lean on. The Angler is the hub: both apps only ever talk to it, and only it touches the models, the database and ComfyUI. The language model and the image model never hold the GPU at the same time (<a href="#gpu">section 12</a>). <code>data/</code> and <code>baitbook.toml</code> live in the home folder, outside the install, and so do baitbook's own ComfyUI and the Gemma files <code>baitbook models</code> downloads. Click a box to jump to its section.</figcaption></figure>
+<script>
+D('d-big', { w: 1000, h: 470,
+  groups: [{ x: 10, y: 40, w: 740, h: 420, t: 'the PC' }],
+  nodes: [
+    { id: 'pcapp', x: 30, y: 70, w: 220, h: 84, t: 'PC app window', s: 'pcapp/ (pywebview)\nshows the Angler’s /app/', k: 'pc', href: '#pcapp' },
+    { id: 'angler', x: 300, y: 70, w: 430, h: 120, t: 'the Angler: baitbook angler', s: 'server.py: FastAPI · /api · /app · /device · /media\nengine.py: one worker thread + the scheduler\nllm.py: Gemma 4 31B in-process (llama-cpp-python)', k: 'engine', href: '#layers' },
+    { id: 'data', x: 30, y: 230, w: 220, h: 90, t: 'data/', s: 'baitbook.db (SQLite) · images/\nangler.log · comfy.log\nin the home folder', k: 'store', shape: 'cyl', href: '#storage' },
+    { id: 'comfy', x: 300, y: 240, w: 220, h: 100, t: 'ComfyUI', s: 'baitbook’s own, in the home folder\n(baitbook comfyui), or the user’s\nits own process and Python,\nstarted and stopped by the Angler', k: 'image', href: '#image' },
+    { id: 'models', x: 550, y: 240, w: 180, h: 100, t: 'model files', s: 'Gemma GGUF + mmproj\nklein DiT · text encoder · VAE\nthe defaults: baitbook models', k: 'ext', shape: 'cyl', href: '#get-models' },
+    { id: 'toml', x: 30, y: 370, w: 220, h: 64, t: 'baitbook.toml', s: 'every setting, beside data/', k: 'config', href: '#config' },
+    { id: 'gpu', x: 300, y: 370, w: 430, h: 64, t: 'the GPU', s: 'holds one model at a time: Gemma, then klein', k: 'ext', href: '#gpu' },
+    { id: 'phone', x: 790, y: 70, w: 190, h: 120, t: 'a phone', s: 'the PWA from /device/\nIndexedDB: posts, images,\nqueued votes\nworks offline', k: 'device', href: '#device' },
+    { id: 'other', x: 790, y: 300, w: 190, h: 90, t: 'another PC (optional)', s: 'the PC app with\n[app] angler_url set;\npairs once, as the owner', k: 'pc', href: '#trust' },
+  ],
+  edges: [
+    { f: 'pcapp:r', t: 'angler:l.3', l: 'HTTP\nlocalhost' },
+    { f: 'angler:l.85', t: 'data:t.8', l: 'SQLite · files', lo: [-30, -4] },
+    { f: 'angler:l.97', t: 'toml:r.5', via: [[275, 186], [275, 402]], l: 'reads ·\nwrites' },
+    { f: 'angler:b.45', t: 'comfy:t.6', l: 'HTTP at comfy_url · the i2i graph\n(its own: a free port from 8190)', lo: [6, 0] },
+    { f: 'angler:b.85', t: 'models:t.7', l: 'loads Gemma', lo: [8, 0] },
+    { f: 'comfy:r', t: 'models:l', l: 'klein', lo: [0, -10] },
+    { f: 'comfy:b.4', t: 'gpu:t.18', d: true },
+    { f: 'models:b.5', t: 'gpu:t.73', d: true },
+    { f: 'phone:l.35', t: 'angler:r.35', two: true, l: 'dock: one POST /api/dock\na paired token · Wi-Fi or Tailscale', c: '#2e7d4f', lo: [0, -64] },
+    { f: 'other:l', t: 'angler:r.85', l: 'HTTP, paired', d: true, lo: [0, 14] },
+  ] });
+</script>
+
+<!-- ============================================================ 2 -->
+<h2 id="layers">2. Inside the Angler</h2>
+<p>The Angler is one Python process with one composition point: FastAPI's startup hook in <code>server.py</code> loads the config, opens the database and builds the one <code>Engine</code>. Its shutdown hook stops a ComfyUI the Angler started. Everything that touches a model goes through the engine; everything that crosses the network goes through <code>server.py</code>. The modules are layers with a direction: the server calls the engine, the engine calls the model wrappers and the store, and nothing below the engine knows there is a web server at all.</p>
+<figure><svg id="d-layers"></svg>
+<figcaption>The modules of <code>angler/</code> and who calls whom. Every module reads its settings through <code>config.section()</code>, and the engine and the server both use <code>media.py</code> (the engine to save new images, the server to serve them), so those arrows are left out. The engine is the only caller of <code>llm.py</code> and <code>imagegen.py</code>.</figcaption></figure>
+<script>
+D('d-layers', { w: 1000, h: 600,
+  nodes: [
+    { id: 'main', x: 20, y: 18, w: 960, h: 56, t: 'angler/__main__.py: main()', s: 'config.load() · UTF-8 logging · locks data/angler.lock (one Angler per data folder) · binds its port(s) before startup · app.state.stop\nTLS if [server] ssl_certfile is set, plus plain HTTP on 127.0.0.1:local_port for the PC app · uvicorn.Server(server.app) · logs the pairing code', k: 'api', href: '#boot' },
+    { id: 'server', x: 20, y: 110, w: 960, h: 78, t: 'server.py: the HTTP API', s: 'client(): this machine is the owner, anything else needs a paired token (a device, or a PC app as the owner) · routes for residents, posts, votes, shifts, config, pairing, the dock\nmounts web/app, web/device, web/shared (config.WEB) as static files · serves /media · POST /api/shutdown', k: 'api', href: '#api' },
+    { id: 'engine', x: 20, y: 228, w: 470, h: 112, t: 'engine.py: Engine', s: 'submit() → one queue → _worker()\n_read(): the vision read · _shift(): a night shift\ncontext() · write_edit() · snapshot(): /api/status\n_recover() at start · _scheduler() + due()', k: 'engine', href: '#worker' },
+    { id: 'web', x: 520, y: 228, w: 460, h: 112, t: 'web/ (served, not imported)', s: 'app/: the PC app (core.js + views-*.js)\ndevice/: the phone app (device.js · device-store.js · sw.js)\nshared/: theme.css · api.js · reef.js', k: 'shared', href: '#pcapp' },
+    { id: 'prompts', x: 20, y: 384, w: 225, h: 100, t: 'prompts.py', s: 'KLEIN_PRIMER · primer()\nread_system · read_ask · MOOD_ASK\nshift_system · edit_ask · too_close\nVARIATION · DIRECTIONS', k: 'llm', href: '#prompts' },
+    { id: 'llm', x: 265, y: 384, w: 225, h: 100, t: 'llm.py: LanguageModel', s: 'llama-cpp-python (built per GPU)\nGemma4ChatHandler (mmproj)\nload · chat · unload', k: 'llm', href: '#llm' },
+    { id: 'db', x: 520, y: 384, w: 220, h: 100, t: 'db.py', s: 'SQLite: residents · posts\nshifts · devices · docks · events\nvote() · chain()', k: 'store', href: '#storage' },
+    { id: 'media', x: 760, y: 384, w: 220, h: 100, t: 'media.py', s: 'save(): png + jpg + _t.jpg\npng() · path() · delete()\navg_color()', k: 'store', href: '#storage' },
+    { id: 'image', x: 20, y: 520, w: 470, h: 64, t: 'imagegen.py: ComfyClient', s: 'workflows/klein_i2i.json · ensure_running · ours · edit · release', k: 'image', href: '#image' },
+    { id: 'config', x: 520, y: 520, w: 460, h: 64, t: 'config.py', s: 'HOME: baitbook.toml + data/ · WEB · EXAMPLE_PATH\nload · get · section · path · update (keeps its comments)', k: 'config', href: '#config' },
+  ],
+  edges: [
+    { f: 'main:b.5', t: 'server:t.5', l: 'runs' },
+    { f: 'server:b.25', t: 'engine:t.52', l: 'submit · snapshot · context' },
+    { f: 'server:b.78', t: 'web:t.57', l: 'StaticFiles' },
+    { f: 'server:b.505', t: 'db:t.1', via: [[505, 362], [542, 362]], l: 'reads · votes', lo: [0, -2] },
+    { f: 'engine:b.24', t: 'prompts:t.5', l: 'texts' },
+    { f: 'engine:b.77', t: 'llm:t.5', l: 'load · chat' },
+    { f: 'engine:b.5', t: 'image:t.5', l: 'edit · release', lo: [0, -68] },
+    { f: 'engine:r.92', t: 'db:l.2' },
+  ] });
+</script>
+
+<div class="callout info"><b>One rule explains most of the structure:</b> there is one GPU, and only one job may use it at a time. Every piece of work that touches a model (a vision read, a night shift) is a job on the engine's one queue, run by its one worker thread. The HTTP handlers never call a model: they queue a job, and the apps poll <code>/api/status</code> to watch it (<a href="#worker">section 5</a>). Inside a night shift the same rule goes one level further: the language model and the image model run in series, never together (<a href="#gpu">section 12</a>).</div>
+
+<!-- ============================================================ 3 -->
+<h2 id="repo">3. Where things live</h2>
+<table>
+  <tr><th>Path</th><th>What is in it</th></tr>
+  <tr><td><code>angler/__main__.py</code></td><td>The Angler's entry point: <code>baitbook angler</code> (or <code>python -m angler</code>). Optional <code>--host</code> and <code>--port</code> override <code>[server]</code> for this process only, through <code>config.override()</code>, so the phone addresses and the Tailscale Serve check see the port it really listens on. Its log is UTF-8, even when it goes to a file. Takes the data folder's lock, binds, with HTTPS on adds the loopback listener for the PC app, and sets <code>app.state.stop</code> for <code>/api/shutdown</code> (<a href="#boot">section 4</a>).</td></tr>
+  <tr><td><code>angler/server.py</code></td><td class="wrap">The FastAPI app: <code>client()</code> (who is calling), every <code>/api</code> route, <code>/media</code>, the static mounts, the <code>sw.js</code> route, the pairing code (<code>pair_code()</code>, with its attempt limit), <code>lan_urls()</code> (looked up at most once a minute: the address of the adapter this machine reaches the network through, so not a WSL, Hyper-V or Docker one, and never a Tailscale one; none when <code>host</code> is loopback only) and <code>tailscale_url()</code> (asked at most every 30 s).</td></tr>
+  <tr><td><code>angler/engine.py</code></td><td class="wrap"><code>Engine</code>: the job queue, <code>_worker</code>, <code>_recover</code> (after a restart), <code>_read</code> (the vision read), <code>_shift</code> (a night shift), <code>write_edit</code> (one edit prompt), <code>_sources</code>, <code>context</code>, <code>snapshot</code>, <code>_scheduler</code> and <code>due</code>; <code>keep_awake()</code>, and <code>slug()</code> for tags.</td></tr>
+  <tr><td><code>angler/llm.py</code></td><td><code>LanguageModel</code> (load with retries, <code>chat</code>, <code>unload</code>) and <code>image_part()</code>, which wraps PNG bytes as a data-URI chat part.</td></tr>
+  <tr><td><code>angler/prompts.py</code></td><td>Every text the language model sees: the klein primer and the vision-read, night-shift, edit and caption texts; <code>clean_reply</code> and <code>parse_tags</code>.</td></tr>
+  <tr><td><code>angler/imagegen.py</code></td><td><code>ComfyClient</code>: starts ComfyUI if needed (and with <code>comfy_base</code> set, refuses one that isn't baitbook's own: <code>ours()</code>), fills and queues the i2i graph (with the loaders for the model files' type), fetches the result, gives the GPU back (<code>release</code>).</td></tr>
+  <tr><td><code>angler/workflows/klein_i2i.json</code></td><td>baitbook's FLUX.2 [klein] image-to-image graph (4B by default, 9B too), in ComfyUI's API format.</td></tr>
+  <tr><td><code>angler/db.py</code>, <code>angler/media.py</code></td><td>The SQLite schema and its queries; image files on disk.</td></tr>
+  <tr><td><code>angler/config.py</code></td><td>Where things live: <code>HOME</code> (the home folder), the config file and <code>data/</code> in it, which <code>BAITBOOK_HOME</code> moves (and <code>BAITBOOK_CONFIG</code> and <code>BAITBOOK_DATA</code> one at a time, for a second Angler such as a test one); <code>WEB</code> and <code>EXAMPLE_PATH</code>, the package's copies or the checkout's. Loads <code>baitbook.toml</code>, filling gaps from the example; <code>path()</code> resolves a relative path against it; <code>update()</code> rewrites single lines so its comments survive; <code>override()</code> lays values for this process only (<code>baitbook angler --port</code>) over every load, and never writes them. <code>local_port()</code> says which port the PC app on this machine uses (<a href="#config">section 14</a>).</td></tr>
+  <tr><td><code>angler/tailscale.py</code></td><td class="wrap">Asks the <code>tailscale</code> command (on PATH, or where the Windows or macOS app put it) what this machine is on its tailnet (<code>machine()</code>: connected, its MagicDNS name, whether certificates are on) and what <code>tailscale serve</code> passes on (<code>serve_url()</code>: the phone app's HTTPS address when the root of a Serve address goes to this Angler's plain-HTTP loopback port). Every answer is None when Tailscale isn't there. <code>baitbook phone</code> and <code>/api/status</code> use it.</td></tr>
+  <tr><td><code>web/app/</code></td><td class="wrap">The PC app: <code>index.html</code>, <code>core.js</code> (routing, status polling, the post card, votes), <code>views-feed.js</code>, <code>views-residents.js</code>, <code>views-shift.js</code>, <code>views-memory.js</code> (Memory and Ledger), <code>views-reef.js</code>, <code>views-settings.js</code>, <code>app.css</code>.</td></tr>
+  <tr><td><code>web/device/</code></td><td class="wrap">The phone app: <code>index.html</code>, <code>device.js</code> (the screens), <code>device-store.js</code> (IndexedDB and the dock), <code>sw.js</code> (the app-shell service worker), <code>manifest.webmanifest</code>, <code>icon.svg</code> and the PNG icons (192, 512, a maskable 512, <code>apple-touch-icon.png</code>), <code>device.css</code>.</td></tr>
+  <tr><td><code>web/shared/</code></td><td><code>theme.css</code> (the cream theme), <code>api.js</code> (fetch with the token, image URLs, small helpers), <code>reef.js</code> (the Reef renderer), <code>fonts/</code> (self-hosted, OFL).</td></tr>
+  <tr><td><code>pcapp/__main__.py</code></td><td>The PC app's native window (pywebview), which <code>baitbook</code> opens. Opens the local Angler over plain HTTP on 127.0.0.1, even with HTTPS on, and starts it in the background if none answers, or in place of a background one that runs older code and is idle. With no native window to be had, it uses the browser (<a href="#pcapp">section 17</a>).</td></tr>
+  <tr><td><code>baitbook/</code></td><td class="wrap">The <code>baitbook</code> command, <code>cli.py</code>: <code>app</code> (the default), <code>angler</code>, <code>stop</code>, <code>status</code>, <code>phone</code>, <code>setup</code>, <code>comfyui</code>, <code>models</code>, <code>shortcut</code>; and <code>baitbook-app</code>, the PC app with no console, which the app icons open. <code>setup.py</code> is <code>baitbook setup</code>, which offers the next two; <code>comfyui.py</code> is <code>baitbook comfyui</code>: it installs baitbook's own ComfyUI, with the PyTorch build for the GPU that <code>gpu.py</code> detects (<a href="#own-comfy">section 11</a>); <code>models.py</code> is <code>baitbook models</code>: it downloads the default models from Hugging Face (<a href="#get-models">section 11</a>); <code>shortcut.py</code> adds the app icon (Start menu, Applications or the app menu); <code>icons/</code> are drawn by <code>tools/make_icons.py</code>. <code>python -m baitbook</code> is the same as <code>baitbook</code>.</td></tr>
+  <tr><td><code>baitbook.example.toml</code></td><td>Every setting, with comments. The first run copies it into the home folder as <code>baitbook.toml</code> (<a href="#config">section 14</a>).</td></tr>
+  <tr><td><code>install.ps1</code>, <code>install.sh</code></td><td>The installers. They install uv if needed, detect the GPU, <code>uv tool install</code> baitbook with the llama-cpp-python wheel index for it (CUDA, HIP, ROCm, Metal, Vulkan or CPU; <code>BAITBOOK_GPU</code> overrides), put <code>baitbook</code> on PATH and run <code>baitbook setup</code>, which offers baitbook's own ComfyUI and the models. Run again to upgrade.</td></tr>
+  <tr><td><code>pyproject.toml</code></td><td>The package, built with hatchling: the <code>baitbook</code> and <code>baitbook-app</code> commands, and a wheel that carries <code>web/</code> and <code>baitbook.example.toml</code> inside the angler package. llama-cpp-python is the optional <code>llm</code> extra. The <code>uv</code> package is a dependency, so <code>baitbook comfyui</code> has uv even where it isn't on PATH. From source, <code>uv sync</code> makes a Python 3.12 <code>.venv/</code> with the test tools, and llama-cpp-python is added by hand (README, "From source").</td></tr>
+  <tr><td><code>tests/</code>, <code>.github/workflows/ci.yml</code></td><td>About 400 tests that need no models (<code>uv run pytest</code>), and CI on Linux, Windows and macOS (<a href="#tests">section 22</a>). <code>test_comfyui.py</code> covers <code>comfyui.py</code> and <code>gpu.py</code>, and <code>test_models.py</code> covers <code>models.py</code>, with nothing fetched from the internet or installed.</td></tr>
+  <tr><td>the home folder</td><td class="wrap">Not in the repository: <code>config.HOME</code>, a folder of the user's own (<a href="#home">section 14</a>). It holds <code>baitbook.toml</code> and <code>data/</code>: <code>baitbook.db</code>, <code>images/</code>, <code>angler.log</code> (when <code>pcapp</code> started the Angler), <code>comfy.log</code>, <code>webview/</code> (the PC app window's storage), <code>angler.lock</code>, <code>angler.port</code> (while an Angler runs) and, once the schema has changed under it, <code>backups/</code>. <code>baitbook comfyui</code> adds <code>comfyui/</code>, and <code>baitbook models</code> adds <code>models/</code>.</td></tr>
+  <tr><td>docs</td><td><code>README.md</code> (installing and running it, ComfyUI, the models, config, notes), its screenshots (<code>docs/screenshots/</code>) and this page. Where they disagree with the code, the code wins.</td></tr>
+</table>
+
+<!-- ============================================================ 4 -->
+<h2 id="boot">4. Boot</h2>
+<p>There are two ways in, both through the <code>baitbook</code> command (<code>baitbook/cli.py</code>). <code>baitbook</code> (or <code>baitbook app</code>, or <code>baitbook-app</code>, which the app icons open with no console) runs <code>pcapp</code>, which opens the PC app on an Angler and starts one in the background if nothing answers. <code>baitbook angler</code> runs the Angler alone, in a console. <code>python -m angler</code> and <code>python -m baitbook</code> still work. Either way the Angler process is the same, and nothing loads a model at boot: the language model loads when a job needs it, and ComfyUI starts when a night shift reaches its image phase. The other subcommands, <code>stop</code>, <code>status</code>, <code>phone</code>, <code>setup</code>, <code>comfyui</code>, <code>models</code> and <code>shortcut</code>, start no Angler. <code>baitbook comfyui</code> won't even run while one answers, since the ComfyUI it repairs may be in use.</p>
+<figure><svg id="d-boot"></svg>
+<figcaption>Both start paths. <code>pcapp</code> starts the Angler detached (on Windows with no console window, elsewhere in a session of its own), from the angler package's parent folder, with its output in <code>data/angler.log</code> (past 5 MB, the old log becomes <code>angler.log.1</code>); closing the window leaves it running, so a scheduled night shift still happens. If it quits, or doesn't answer in 60 s, the window shows the log's path instead of the app. An Angler that answers but runs other code than <code>pcapp</code>'s (its <code>code</code> in <code>/api/status</code> isn't <code>config.code_version()</code>: a checkout changed, or an upgrade installed, since it started) is stopped and started again first, if it was started with <code>--background</code> (as <code>pcapp</code> starts it) and is idle with nothing queued. <code>pcapp</code> waits until it has let go of the data folder (<code>data_in_use()</code>), so the new one doesn't find the lock still held. One in a console, or busy, is left alone. With <code>[app] angler_url</code> set, <code>pcapp</code> opens that Angler instead and starts nothing; the first time, the app pairs with it as the owner (<a href="#pcapp">section 17</a>).</figcaption></figure>
+<script>
+D('d-boot', { w: 1000, h: 430,
+  nodes: [
+    { id: 'cmdapp', x: 20, y: 20, w: 200, h: 60, t: 'baitbook', s: 'or baitbook-app (the icons)\ncli.py: cmd_app()', k: 'pc' },
+    { id: 'pcmain', x: 250, y: 20, w: 300, h: 60, t: 'pcapp/__main__.py: main()', s: 'reads [app] angler_url, else http://\n127.0.0.1:port (local_port if HTTPS)', k: 'pc', href: '#pcapp' },
+    { id: 'reach', x: 580, y: 20, w: 170, h: 60, t: 'reachable(url)?', s: 'GET /api/status', k: 'st', shape: 'pill' },
+    { id: 'spawn', x: 780, y: 20, w: 200, h: 60, t: 'Popen, detached', s: 'python -m angler\n→ data/angler.log', k: 'pc' },
+    { id: 'window', x: 20, y: 120, w: 960, h: 50, t: 'webview.create_window("baitbook", url + "/app/")', s: 'the PC app: 1440 × 920; closing it leaves the Angler running · no Angler: a page with the log’s path · no window: the browser', k: 'pc', href: '#pcapp' },
+    { id: 'cmdangler', x: 20, y: 220, w: 200, h: 60, t: 'baitbook angler', s: 'cli.py: cmd_angler()\n(or python -m angler)', k: 'api' },
+    { id: 'amain', x: 250, y: 220, w: 300, h: 60, t: 'angler/__main__.py: main()', s: 'config.load() · lock data/angler.lock\nbind port (+ 127.0.0.1:local_port if TLS)', k: 'api' },
+    { id: 'uv', x: 580, y: 220, w: 400, h: 60, t: 'uvicorn.Server(server.app).run(sockets)', s: 'logs the port and the pairing code\nwith TLS: a 2nd Server, lifespan off, on the loopback socket', k: 'api' },
+    { id: 'startup', x: 20, y: 330, w: 330, h: 80, t: 'server._start(): on startup', s: 'config.load()\ndb.conn(): opens data/baitbook.db,\nruns the schema, WAL mode', k: 'api', href: '#storage' },
+    { id: 'eng', x: 380, y: 330, w: 600, h: 80, t: 'Engine(): _recover(), then two daemon threads', s: '_recover(): cut-off shifts → interrupted · cut-off reads queued again\nangler-worker: waits on the job queue (section 5)\nangler-scheduler: checks [shift] every 20 s (section 21) · no model loaded yet', k: 'engine', href: '#worker' },
+  ],
+  edges: [
+    { f: 'cmdapp', t: 'pcmain' }, { f: 'pcmain', t: 'reach' },
+    { f: 'reach', t: 'spawn', l: 'no' },
+    { f: 'reach:b.5', t: 'window:t.69', l: 'yes', lo: [14, 0] },
+    { f: 'spawn:b.5', t: 'window:t.9', d: true, l: 'once it answers\n(up to 60 s)', lo: [52, 0] },
+    { f: 'spawn:r', t: 'amain:t.5', via: [[992, 50], [992, 196], [400, 196]], d: true, l: 'starts', lo: [0, -8] },
+    { f: 'cmdangler', t: 'amain' }, { f: 'amain', t: 'uv' },
+    { f: 'uv:b.5', t: 'startup:t.5', via: [[780, 306], [185, 306]] },
+    { f: 'startup', t: 'eng', l: 'builds' },
+  ] });
+</script>
+<ul>
+  <li><b>Config is read twice on purpose.</b> <code>__main__</code> needs <code>[server]</code> before the app exists; <code>_start()</code> loads it again inside the server process. After that every module asks <code>config.section()</code> each time, so an edit from the PC app takes effect on the next job without a restart (<a href="#config">section 14</a>).</li>
+  <li><b>The pairing code is per process.</b> <code>pair_code()</code> draws six random digits the first time it is asked (by <code>__main__</code>, which logs it), and the PC app shows it in Settings. A restart, or 5 wrong tries, makes a new one; tokens already handed out stay valid (<a href="#trust">section 16</a>).</li>
+  <li><b>No teardown of jobs, but a recovery.</b> The worker and scheduler are daemon threads, so stopping the Angler stops them mid-job; finished posts are kept. Jobs live only in memory, so at the next start <code>Engine._recover()</code> marks any shift still at <code>running</code> as <code>interrupted</code>, and queues the vision read again for any resident still at <code>reading</code>.</li>
+  <li><b>Stopping it.</b> <code>baitbook stop</code> calls <code>POST /api/shutdown</code> on the Angler on this machine, then waits up to 30 s for it to stop answering. Only this machine may call that route (<code>is_local()</code>), so a PC app paired as the owner gets a 403. The route answers first, then sets <code>should_exit</code> on each uvicorn server through <code>app.state.stop</code>, which <code>main()</code> set. Uvicorn then runs the shutdown hook, <code>server._stop()</code>, which stops a ComfyUI the Angler started (<code>stop_started_comfy()</code>), so it doesn't sit on the GPU. While a job runs, <code>baitbook stop</code> refuses without <code>--force</code>; a shift cut off that way is marked <code>interrupted</code> at the next start. Ctrl+C stops a <code>baitbook angler</code> running in a console.</li>
+  <li><b>One Angler per data folder.</b> Before anything opens the database, <code>main()</code> takes an OS lock on <code>data/angler.lock</code> (<code>msvcrt.locking</code> on Windows, <code>flock</code> elsewhere). It is held until the process ends, however it ends. A second Angler on the same data, on any port, logs "Another Angler is already running on …; this one exits without touching it" and exits with status 1. Without the lock, its <code>_recover()</code> would mark the running Angler's shift <code>interrupted</code> before its bind failed. Once its ports are bound, the Angler notes its loopback port in <code>data/angler.port</code> and removes the note when it stops. <code>baitbook status</code>, <code>stop</code> and the PC app look there (<code>config.angler_port()</code>), so they find one started with <code>--port</code>; a note is only believed while the lock is held, so one left by a killed Angler is ignored. <code>data_in_use()</code> asks without keeping it: it takes the lock and unlocks at once (on Windows explicitly, since a close lets go of a lock only eventually).</li>
+  <li><b>Bind first, then start.</b> Uvicorn runs the app's startup before it binds, so <code>main()</code> binds the socket(s) itself and hands them to <code>uvicorn.Server.run(sockets=…)</code>. A port that is taken is a clear error ("Can't listen on …") and an exit, before the engine exists.</li>
+  <li><b>With HTTPS on, there are two listeners.</b> <code>[server] ssl_certfile</code> makes the main port HTTPS. A second <code>uvicorn.Server</code> serves the same app over plain HTTP on <code>127.0.0.1:[server] local_port</code> (8788). It runs in a thread with lifespan off, so the startup runs once, and it answers only once the main server has started. <code>pcapp</code> opens that listener, so no certificate has to name 127.0.0.1 (<a href="#pcapp">section 17</a>).</li>
+</ul>
+
+<!-- ============================================================ 5 -->
+<h2 id="worker">5. One worker, one GPU job</h2>
+<p><code>Engine</code> (<code>angler/engine.py</code>) owns everything that touches a model. Work arrives through <code>submit(kind, **args)</code>, waits on one <code>queue.Queue</code>, and is run by one thread, <code>angler-worker</code>, one job at a time. The worker publishes what it is doing into a <code>status</code> dict, and the apps read a copy of it from <code>GET /api/status</code>. Nothing waits on a job: the HTTP handler that queued it has already answered.</p>
+<figure><svg id="d-worker"></svg>
+<figcaption>Who queues work, how it runs, and how the apps watch it. A second night shift is refused while one is queued or running; vision reads queue behind whatever is running. Whatever happens, the worker's <code>finally</code> unloads the language model, so the GPU is free between jobs. While a job runs, <code>keep_awake()</code> keeps the machine from idling into sleep (<a href="#schedule">section 21</a>; closing a laptop's lid still sleeps it).</figcaption></figure>
+<script>
+D('d-worker', { w: 1000, h: 440,
+  nodes: [
+    { id: 'cr', x: 20, y: 20, w: 220, h: 56, t: 'POST /api/residents', s: 'and …/{id}/read: kind read', k: 'api', href: '#read' },
+    { id: 'cs', x: 20, y: 96, w: 220, h: 56, t: 'POST /api/shift', s: 'run_shift(): trigger manual', k: 'api', href: '#shift' },
+    { id: 'sch', x: 20, y: 172, w: 220, h: 56, t: '_scheduler()', s: 'trigger schedule (section 21)', k: 'engine', href: '#schedule' },
+    { id: 'submit', x: 300, y: 76, w: 260, h: 96, t: 'Engine.submit(kind, **args)', s: 'refuses a shift if one is queued\nor running: {ok: false, reason}\nappends to pending (shown as queued)\njobs.put(job)', k: 'engine' },
+    { id: 'q', x: 610, y: 86, w: 130, h: 76, t: 'jobs', s: 'queue.Queue', k: 'engine', shape: 'cyl' },
+    { id: 'worker', x: 790, y: 50, w: 190, h: 150, t: '_worker()', s: 'forever: jobs.get()\npops pending · keep_awake\nread → _read()\nshift → _shift()\nthen status = _idle()\nfinally: unload()', k: 'engine' },
+    { id: 'status', x: 560, y: 270, w: 420, h: 70, t: 'status (under Engine.lock)', s: 'state · job · phase · detail · items · error · updated\nwritten through _set(**kw) as the job goes', k: 'st' },
+    { id: 'snap', x: 300, y: 270, w: 210, h: 70, t: 'snapshot()', s: 'a copy + queued + next_run', k: 'engine' },
+    { id: 'api', x: 20, y: 270, w: 230, h: 70, t: 'GET /api/status', s: 'engine snapshot + counts\n+ models, pair code (local)', k: 'api', href: '#api' },
+    { id: 'apps', x: 20, y: 370, w: 960, h: 52, t: 'the PC app polls: every 1.5 s while a job runs, every 8 s when idle', s: 'core.js poll(): redraws the pill, hands the status to the open view; when a job ends it reloads residents and redraws', k: 'pc', href: '#pcapp' },
+  ],
+  edges: [
+    { f: 'cr:r', t: 'submit:l.2' }, { f: 'cs:r', t: 'submit:l.5' }, { f: 'sch:r', t: 'submit:l.85' },
+    { f: 'submit', t: 'q' }, { f: 'q', t: 'worker:l.42' },
+    { f: 'worker:b.5', t: 'status:t.84', l: '_set()' },
+    { f: 'status:l', t: 'snap:r', l: 'copies' },
+    { f: 'snap:l', t: 'api:r' },
+    { f: 'api:b.5', t: 'apps:t.14', two: true },
+  ] });
+</script>
+<table>
+  <tr><th><code>state</code></th><th>Meaning</th></tr>
+  <tr><td><code>idle</code></td><td>Nothing running. <code>next_run</code> says when the schedule fires, or <code>null</code> when it is off.</td></tr>
+  <tr><td><code>starting</code></td><td>The worker has taken a job (<code>job</code> says which) and it hasn't set its first phase yet.</td></tr>
+  <tr><td><code>reading</code></td><td>A vision read; <code>resident</code> names who, <code>items</code> has one entry per seed image plus one for the mood tags.</td></tr>
+  <tr><td><code>writing</code></td><td>A night shift, phase 1: the language model is writing prompts and captions.</td></tr>
+  <tr><td><code>editing</code></td><td>A night shift, phase 2: the image model is editing.</td></tr>
+  <tr><td><code>error</code></td><td>The last job raised. <code>error</code> holds the message, every item it had not finished says <code>stopped</code>, the journal has an <code>error</code> event, and the next job clears it.</td></tr>
+</table>
+
+<!-- ============================================================ 6 -->
+<h2 id="read">6. A resident is born</h2>
+<p>A resident starts as a name, a handle, a bio and 5 images. <code>create_resident</code> in <code>server.py</code> stores the images first (a file that isn't an image is a 400, and the ones already stored are deleted, so nothing is left and the upload can be tried again), then records the resident with <code>status = 'reading'</code> and the images as its <b>seed posts</b> (<code>kind = 'seed'</code>, night 0) in one transaction, and queues a <code>read</code> job. The read is <code>Engine._read</code>: one conversation with the language model, with two jobs. It writes a base prompt for each seed image, then 3 to 5 mood tags for all of them together. The same job runs again from the resident's card: "Read again" after a read failed, or "re-read" to rewrite the base prompts (<code>POST /api/residents/{id}/read</code>).</p>
+<figure><svg id="d-read"></svg>
+<figcaption>The vision read. Every turn stays in one conversation, so by the last turn the model has all five images in view. The base prompts are written here, and only rewritten when the owner asks for a re-read; they are what keeps a resident pinned to their original images. Purple arrows are writes the PC app sees on its next poll.</figcaption></figure>
+<script>
+S('d-read', { w: 1000, row: 34,
+  actors: [{ id: 'pc', t: 'PC app\n(Residents)', k: 'pc' }, { id: 'api', t: 'server.py', k: 'api' }, { id: 'st', t: 'db.py · media.py', k: 'store' },
+           { id: 'eng', t: 'Engine._read', k: 'engine' }, { id: 'img', t: 'ComfyClient', k: 'image' }, { id: 'lm', t: 'LanguageModel\n(Gemma + mmproj)', k: 'llm' }],
+  steps: [
+    { f: 'pc', t: 'api', l: 'POST /api/residents\nname · handle · bio · 5 images' },
+    { f: 'api', t: 'st', l: 'media.save() × 5 · add_post(seed)' },
+    { f: 'api', t: 'eng', l: "submit('read', resident_id)" },
+    { f: 'api', t: 'pc', l: 'the resident, status: reading', d: true },
+    { note: 'the worker takes the job when the GPU is free (section 5)', over: ['eng', 'lm'] },
+    { f: 'eng', t: 'img', l: 'release(): give the GPU back' },
+    { f: 'eng', t: 'lm', l: 'load()' },
+    { note: 'system: read_system(): the image model’s primer + the two-part task (section 9)', over: ['eng', 'lm'] },
+    { note: 'for each seed image, in order', over: ['st', 'lm'] },
+    { f: 'eng', t: 'lm', l: 'user: image_part(png) + read_ask(i, 5)' },
+    { f: 'lm', t: 'eng', l: 'a prompt for that image', d: true },
+    { f: 'eng', t: 'st', l: 'update_post(seed, prompt)', c: '#7a4fb5' },
+    { gap: 6 },
+    { f: 'eng', t: 'lm', l: 'user: MOOD_ASK' },
+    { f: 'lm', t: 'eng', l: '"hushed, warm, domestic"', d: true },
+    { f: 'eng', t: 'eng', l: 'parse_tags() · slug() for hashtags' },
+    { f: 'eng', t: 'st', l: "update_resident(moods, status 'ready')\nseed tags · event('resident')", c: '#7a4fb5' },
+    { f: 'eng', t: 'lm', l: 'unload() (the worker’s finally)' },
+    { f: 'pc', t: 'api', l: 'GET /api/status, every 1.5 s: items[i].stage, prompt', d: true },
+  ] });
+</script>
+<ul>
+  <li><b>Temperature 0.4.</b> <code>[text] read_temperature</code>: the read is description, not invention. A prompt may run to 320 tokens; the tags to 60.</li>
+  <li><b>Each prompt must stand alone.</b> The model sees the earlier images, so both <code>read_system</code> and every <code>read_ask</code> tell it never to write "same as before". A base prompt is later edited on its own, with no other image in sight.</li>
+  <li><b>Watermarks and dates are left out.</b> Images saved from the web carry @handles, signatures and dates. Copied into a base prompt, they would be copied into every edit after it. <code>read_system</code> asks for the picture as if they were not there, and each <code>read_ask</code> repeats it. Text that belongs to the picture, like a sign in the scene, stays.</li>
+  <li><b>A read that fails leaves the resident <code>failed</code>.</b> <code>_read</code> sets the status before the error reaches the worker. Night shifts skip the resident until a read finishes, and the card offers "Read again". A read cut off by a restart is queued again by <code>_recover()</code>.</li>
+  <li><b>The tags are tidied.</b> <code>parse_tags</code> splits on commas and newlines, lowercases, strips stray punctuation and quotes, drops duplicates and keeps 5. If nothing usable comes back, the resident gets <code>["quiet"]</code>. The owner can rewrite them on the resident's card (<code>PATCH /api/residents/{id}</code>).</li>
+  <li><b>It is slow by design, and a little slower than it needs to be.</b> About three minutes for 5 images. The multimodal chat handler re-encodes every image already in the conversation on each turn, so turn 5 encodes five images. That is fine for something done once per resident; a projector cache would remove it.</li>
+</ul>
+
+<!-- ============================================================ 7 -->
+<h2 id="shift">7. A night shift, end to end</h2>
+<p>A night shift is <code>Engine._shift(trigger)</code>. It makes <code>[shift] posts_per_resident</code> new posts for every resident whose read has finished, and every one of them is an image-to-image edit of an older image. It runs in two phases, in series. First the language model writes every prompt and caption for the night and unloads. Then the image model renders every edit. The two never hold the GPU together (<a href="#gpu">section 12</a>).</p>
+<figure><svg id="d-shift"></svg>
+<figcaption><code>_shift</code> for one resident and one post; the loops run over every resident (one conversation each) and every pick. Purple arrows are writes the apps see. The ComfyUI the Angler started is stopped again at the end; one started by someone else is only asked to free its models.</figcaption></figure>
+<script>
+S('d-shift', { w: 1000, row: 33,
+  actors: [{ id: 'eng', t: 'Engine._shift', k: 'engine' }, { id: 'db', t: 'db.py · media.py', k: 'store' }, { id: 'lm', t: 'LanguageModel', k: 'llm' },
+           { id: 'img', t: 'ComfyClient', k: 'image' }, { id: 'cu', t: 'ComfyUI\n(its own process)', k: 'ext' }],
+  steps: [
+    { f: 'eng', t: 'db', l: 'start_shift(trigger) · residents (ready)' },
+    { f: 'eng', t: 'db', l: 'purge_snags(): the snagged posts’ image files go', c: '#7a4fb5' },
+    { f: 'eng', t: 'db', l: '_sources(res, before = start)' },
+    { f: 'eng', t: 'eng', l: 'picks: rng.sample(sources), repeats only if too few' },
+    { note: 'phase 1 · the language model writes', over: ['eng', 'cu'] },
+    { f: 'eng', t: 'img', l: 'release(): stop the Angler’s ComfyUI' },
+    { f: 'eng', t: 'lm', l: 'load()' },
+    { note: 'for each resident: one conversation, system = context(res).system (section 8)', over: ['eng', 'lm'] },
+    { f: 'eng', t: 'eng', l: 'write_edit(): pick_directions(rng, variation)' },
+    { f: 'eng', t: 'lm', l: 'user: edit_ask(source, directions, variation)' },
+    { f: 'lm', t: 'eng', l: 'the edit prompt (clean_reply)', d: true },
+    { f: 'eng', t: 'lm', l: 'too close to the source, a base prompt or tonight’s? once more: too_close()' },
+    { f: 'eng', t: 'lm', l: 'user: CAPTION_ASK' },
+    { f: 'lm', t: 'eng', l: 'one line in their voice', d: true },
+    { f: 'eng', t: 'lm', l: 'unload()' },
+    { note: 'phase 2 · the image model edits', over: ['eng', 'cu'] },
+    { f: 'eng', t: 'img', l: 'ensure_running()' },
+    { f: 'img', t: 'cu', l: 'start it if nothing answers' },
+    { f: 'eng', t: 'img', l: 'edit(source png, prompt, seed)' },
+    { f: 'img', t: 'cu', l: '/upload/image · POST /prompt' },
+    { f: 'cu', t: 'img', l: '/history … /view: the PNG', d: true },
+    { f: 'img', t: 'eng', l: 'PNG bytes', d: true },
+    { f: 'eng', t: 'db', l: "media.save() · add_post(kind 'edit',\nsource_id, prompt, caption, tags, shift_id)", c: '#7a4fb5' },
+    { f: 'eng', t: 'img', l: 'release()' },
+    { f: 'eng', t: 'db', l: "finish_shift('done', made) · event('shift')\n(on an exception: finish_shift('failed', …, error))", c: '#7a4fb5' },
+  ] });
+</script>
+<ul>
+  <li><b>Who takes part.</b> Residents with <code>status = 'ready'</code> and at least one source. A resident whose read is still running, or who has no usable source, is skipped for the night.</li>
+  <li><b>Picks differ when they can.</b> Sources are drawn with <code>rng.sample</code>, so a night edits different images. Only a resident with fewer sources than <code>posts_per_resident</code> gets an image edited twice, and then the "never repeat a prompt" rule and different directions keep the two edits apart.</li>
+  <li><b>Each edit is told what to change.</b> <code>write_edit</code> gives every edit its own directions (the place, the moment, the camera…), and sends a prompt back once if it comes back too close to what exists (<a href="#variation">section 9</a>).</li>
+  <li><b>A shift that raises is marked <code>failed</code></b>, with the message in the row's <code>error</code> and the posts it made so far counted. The worker writes the journal and the status.</li>
+  <li><b>Captions.</b> Up to 48 tokens, the first line only, at most 140 characters, lowercased.</li>
+  <li><b>A fresh seed per edit.</b> <code>rng.randrange(1, 2**31)</code>, stored on the post.</li>
+  <li><b>Tags.</b> Each new post gets the resident's first four mood tags, through <code>slug()</code>.</li>
+</ul>
+
+<h3 id="shift-stages">What the apps see</h3>
+<p>While a shift runs, <code>status.items</code> has one entry per pick: the resident, the source's id and image, the turn number, what the edit was asked to change (<code>change</code>, shown on the row) and how close its prompt stayed (<code>similarity</code>), and a <code>stage</code> that moves forward as the shift does. The Night shift view in the PC app draws each item as a row: the source image fades until its edit lands on top of it.</p>
+<table>
+  <tr><th><code>stage</code></th><th>Phase</th><th>Meaning</th></tr>
+  <tr><td><code>queued</code></td><td>1</td><td>Not reached yet.</td></tr>
+  <tr><td><code>writing</code></td><td>1</td><td>The language model is writing this item's prompt and caption.</td></tr>
+  <tr><td><code>written</code></td><td>1 → 2</td><td>Prompt and caption are in; waiting for the image model.</td></tr>
+  <tr><td><code>editing</code></td><td>2</td><td>ComfyUI is rendering this edit.</td></tr>
+  <tr><td><code>packed</code></td><td>2</td><td>Saved: <code>post_id</code> and <code>image</code> are set.</td></tr>
+  <tr><td><code>failed</code></td><td>2</td><td>No prompt came back, or the edit raised; <code>error</code> has why. The other items carry on, and the shift still finishes as <code>done</code> with the posts it made.</td></tr>
+  <tr><td><code>stopped</code></td><td>either</td><td>The whole shift raised before reaching this item (the language model would not load, ComfyUI would not start). Set by the worker.</td></tr>
+</table>
+
+<!-- ============================================================ 8 -->
+<h2 id="context">8. Sources, examples, chains</h2>
+<p>Two things decide what a night shift makes: which old image each post edits, and what the language model is shown about the owner's taste. The first is <code>Engine._sources</code>, the second <code>Engine.context</code>. Both read only the database; votes count the moment they reach the Angler, from the PC app directly or from a phone when it docks.</p>
+<figure><svg id="d-context"></svg>
+<figcaption>Source picking (left) and tonight's context (right). A throw-back is never edited again and never appears as a good example; it only ever appears as a bad one. A snag appears in neither, and is never edited again. The sample is drawn fresh for each resident each night, so with the defaults (5 bites, 3 throw-backs) the context stays about 13 prompts long however much the owner votes.</figcaption></figure>
+<script>
+D('d-context', { w: 1000, h: 420,
+  groups: [{ x: 10, y: 10, w: 470, h: 400, t: 'which image to edit: _sources() + the picks' }, { x: 510, y: 10, w: 480, h: 400, t: 'what the model is told: context(res, rng)' }],
+  nodes: [
+    { id: 'all', x: 30, y: 40, w: 430, h: 56, t: 'every post of this resident', s: 'seed images · earlier edits', k: 'store' },
+    { id: 'src', x: 30, y: 130, w: 430, h: 84, t: '_sources(rid, before)', s: 'created before this shift started\nvote ≥ 0 and not snagged:\nnever a throw-back, never a snag', k: 'engine' },
+    { id: 'pick', x: 30, y: 250, w: 430, h: 56, t: 'rng.sample(sources, posts_per_resident)', s: 'different images; repeats only when there are fewer sources', k: 'engine' },
+    { id: 'chain', x: 30, y: 340, w: 430, h: 56, t: 'post.source_id → db.chain(p)', s: 'every edit records its source: the lineage back to a seed', k: 'store', href: '#reef' },
+    { id: 'base', x: 530, y: 40, w: 440, h: 56, t: 'base: every seed’s prompt', s: 'from the vision read; only a re-read changes them', k: 'llm' },
+    { id: 'good', x: 530, y: 110, w: 215, h: 84, t: 'good examples', s: 'random.sample(bites,\n≤ good_examples (5))\nvote > 0 · not snagged', k: 'llm' },
+    { id: 'bad', x: 755, y: 110, w: 215, h: 84, t: 'bad examples', s: 'random.sample(throw-backs,\n≤ bad_examples (3; 0 = none))\nvote < 0 · not snagged', k: 'llm' },
+    { id: 'sys', x: 530, y: 240, w: 440, h: 80, t: 'prompts.shift_system(image, res, base, good, bad)', s: 'the primer · who the resident is · mood tags\nbase prompts · good · bad · how to answer', k: 'llm', href: '#prompts' },
+    { id: 'turns', x: 530, y: 340, w: 440, h: 56, t: 'then per pick: edit_ask(source, directions) · CAPTION_ASK', s: 'one conversation per resident per night', k: 'llm' },
+  ],
+  edges: [
+    { f: 'all', t: 'src' }, { f: 'src', t: 'pick' }, { f: 'pick', t: 'chain', d: true, l: 'the new post’s source_id' },
+    { f: 'base:b.5', t: 'sys:t.5' }, { f: 'good', t: 'sys:t.25' }, { f: 'bad', t: 'sys:t.75' }, { f: 'sys', t: 'turns' },
+    { f: 'pick:r', t: 'turns:l.4', via: [[495, 278], [495, 362]], l: 'source.prompt', lo: [0, 0] },
+  ] });
+</script>
+<p><b>The Memory view shows this exactly.</b> <code>GET /api/residents/{id}/memory</code> calls the same <code>context()</code> with a fresh random draw and returns the full system prompt plus which bites and throw-backs were sampled; "Re-roll the sample" simply asks again. Nothing is saved, so the next night shift draws its own sample.</p>
+
+<h3 id="snags">Bites, throw-backs and snags</h3>
+<p>The owner has three verdicts for an edit, and they teach the Angler different things:</p>
+<table>
+  <tr><th>Verdict</th><th>Means</th><th>As a source</th><th>As an example</th><th>In the feeds</th></tr>
+  <tr><td><b>bite</b> (<code>vote = 1</code>)</td><td>more like this</td><td>yes</td><td>good, up to <code>[shift] good_examples</code> (5)</td><td>stays</td></tr>
+  <tr><td><b>throw back</b> (<code>vote = −1</code>)</td><td>not this idea</td><td>never again: its line of edits stops</td><td>bad, up to <code>[shift] bad_examples</code> (3)</td><td>leaves the phone at the next dock</td></tr>
+  <tr><td><b>snag</b> (<code>snagged_at</code> set)</td><td>a broken render: wrong anatomy, garbled detail</td><td>never</td><td>never</td><td>leaves both at once; the image files go at the next night shift</td></tr>
+</table>
+<ul>
+  <li><b>Why more good examples than bad.</b> A bad example is a whole prompt that the model must read, then guess what was wrong with it. This model also copies wording readily, so a full bad prompt in its context can leak into a new one. And a throw-back already has a stronger effect without any examples: its image is never edited again, so that branch dies. So the defaults are 5 and 3. With <code>bad_examples = 0</code>, <code>shift_system(…, with_bad=False)</code> leaves out the bad-examples section and its rule entirely, rather than showing an empty heading.</li>
+  <li><b>Why a snag is not a throw-back.</b> Before snags, a render that came out broken could only be thrown back. That taught the model "the viewer dislikes this idea" when the failure was the image model's. Worse, an unvoted broken post is a source the next night, and since an edit is made from its source image, the breakage would carry into the next post. A snag takes the post out of everything without teaching anything.</li>
+  <li><b>The snag rate measures the image model.</b> The bite rate is about taste; the snag rate is how often renders come out broken: snags ÷ every edit made. Snags count even after their images are cleared, since the row stays (<code>db.count_snags</code>). The PC app shows it overall (the Feed's side card), per resident (their card) and per night (History: <code>db.shifts()</code> adds <code>n_snags</code>). Per night is where it helps: after changing steps, size, the variation or the image model, the next nights show whether renders break more or less.</li>
+  <li><b>A snag can be undone until the next night shift.</b> Snagging only sets <code>snagged_at</code>: the PC app's toast and the Ledger's "snagged" filter offer undo, and so does the phone's toast. An undo on the phone after a dock took the snag out (while that dock is still out, or if it never came back) goes home with the next dock as an <code>unsnag</code>; once a dock has come back, the post is off the phone and the PC app's Ledger is where to undo it. At the start of each shift, <code>db.purge_snags()</code> sets the snags' <code>image</code> to null and the engine deletes their files. The row and its prompt stay, so a chain that passes through a snag still adds up (the prompt panel shows it as a dashed "snag" link), and the prompts of broken renders stay on record.</li>
+</ul>
+
+<!-- ============================================================ 9 -->
+<h2 id="prompts">9. The prompts</h2>
+<p>Every word the language model sees is in <code>angler/prompts.py</code>. There are two conversations, and the image model's <b>prompt primer</b> opens both. By default that is <code>KLEIN_PRIMER</code>, the rules for writing FLUX.2 [klein] prompts (4B or 9B): narrative prose, subject first, then setting and light, style and finish, composition and colour, about 30 to 100 words, no tag lists, no weight syntax. <code>primer(image_cfg)</code> reads <code>[image] primer_file</code> instead when it names a file, so a different image model brings its own rules.</p>
+<figure><svg id="d-convo"></svg>
+<figcaption>The two conversations, as message lists. Both are plain chat, with no tools: every reply is text, used as-is after <code>clean_reply()</code>. Each night shift conversation lives for one resident's picks and is thrown away.</figcaption></figure>
+<script>
+D('d-convo', { w: 1000, h: 400,
+  groups: [{ x: 10, y: 10, w: 480, h: 380, t: 'the vision read (Engine._read)' }, { x: 510, y: 10, w: 480, h: 380, t: 'a night shift, one resident (Engine._shift)' }],
+  nodes: [
+    { id: 'r0', x: 30, y: 40, w: 440, h: 64, t: 'system: read_system(image, n)', s: 'primer() · "you are setting up a new resident"\na prompt per image, then mood tags · no watermarks or dates', k: 'llm' },
+    { id: 'r1', x: 30, y: 120, w: 440, h: 50, t: 'user: [image 1] + read_ask(1, n)', s: 'assistant: its prompt', k: 'llm' },
+    { id: 'r2', x: 30, y: 180, w: 440, h: 40, t: '… one pair per seed image …', k: 'plain', shape: 'note' },
+    { id: 'r3', x: 30, y: 230, w: 440, h: 50, t: 'user: [image n] + read_ask(n, n)', s: 'assistant: its prompt', k: 'llm' },
+    { id: 'r4', x: 30, y: 296, w: 440, h: 76, t: 'user: MOOD_ASK', s: '"Looking at all the images together,\ngive 3 to 5 mood tags for this resident."\nassistant: tags, comma-separated → parse_tags()', k: 'llm' },
+    { id: 's0', x: 530, y: 40, w: 440, h: 64, t: 'system: shift_system(image, res, base, good, bad)', s: 'primer() · name, handle, bio, mood tags\nbase prompts · good examples · bad examples · rules', k: 'llm' },
+    { id: 's1', x: 530, y: 120, w: 440, h: 50, t: 'user: edit_ask(source, directions, variation)', s: 'assistant: the new image’s prompt (asked once more if too close)', k: 'llm' },
+    { id: 's2', x: 530, y: 180, w: 440, h: 50, t: 'user: CAPTION_ASK', s: 'assistant: one lowercase line in their voice', k: 'llm' },
+    { id: 's3', x: 530, y: 240, w: 440, h: 40, t: '… one pair of turns per pick …', k: 'plain', shape: 'note' },
+    { id: 's4', x: 530, y: 296, w: 440, h: 76, t: 'what the rules ask for', s: 'a new post, not a retouch: an obvious change\nkeep who it is and the look · in fresh words\nno watermarks or dates · never repeat a prompt', k: 'note', shape: 'note' },
+  ],
+  edges: [] });
+</script>
+<table>
+  <tr><th>Name</th><th>Used by</th><th>What it is</th></tr>
+  <tr><td><code>KLEIN_PRIMER</code>, <code>primer()</code></td><td>both</td><td>How to write prompts for the image model. Opens every system prompt.</td></tr>
+  <tr><td><code>read_system</code>, <code>read_ask</code>, <code>MOOD_ASK</code></td><td>the vision read</td><td>The two-part task, the per-image question (with "as if no other image existed" and "leave out any watermark, username, signature or date"), and the tags question.</td></tr>
+  <tr><td><code>shift_system</code></td><td>a night shift</td><td>The resident, their mood tags, base prompts, good and bad examples, and how to answer: a new post rather than a retouch, in fresh words, without watermarks or dates; then the caption rule.</td></tr>
+  <tr><td><code>edit_ask</code>, <code>CAPTION_ASK</code></td><td>a night shift</td><td>"This is the prompt of image #N … Write the prompt for a new post made by editing this image. Change: …" with this edit's directions and the variation's sentence. Then the caption request.</td></tr>
+  <tr><td><code>VARIATION</code>, <code>DIRECTIONS</code>, <code>pick_directions</code></td><td>a night shift</td><td>How far edits move, and what an edit can be told to change (below).</td></tr>
+  <tr><td><code>too_close</code>, <code>similarity</code>, <code>closest</code></td><td>a night shift</td><td>The second ask for a prompt that stayed too close ("That prompt is 92% the same as one you already have…"), and the word-level comparison behind it.</td></tr>
+  <tr><td><code>clean_reply</code></td><td>every reply</td><td>Drops a leading <code>&lt;think&gt;</code> block, a <code>Prompt:</code> or <code>Caption:</code> prefix, wrapping quotes or backticks, and stray asterisks.</td></tr>
+  <tr><td><code>parse_tags</code></td><td>the mood tags; <code>PATCH</code> of a resident</td><td>Comma- or line-separated text to at most 5 clean, lowercase, distinct tags.</td></tr>
+</table>
+
+<h3 id="variation">How far an edit moves</h3>
+<p>The first build asked for an edit with "Change one or two things… Keep the rest". Gemma 4 31B took that literally. It copied the source prompt and changed a word or two, so most edits shared nearly all their wording with their source ("one hand" became "both hands", a line of text changed). One edit even changed "both hands" back to "one hand", recreating the seed's own prompt. With the source passed in as a reference, klein then made an image that was almost the same. Three things now push edits apart:</p>
+<ul>
+  <li><b>Directions.</b> <code>pick_directions</code> draws what each edit must change, by weight, without repeats: the place (3), the moment (3), the time and weather (2), the outfit (2), the camera (2), a new detail (2), the mood (1), and the medium (1, only at <code>wild</code>). <code>edit_ask</code> lists them, and the status row shows them ("changing the place + the camera").</li>
+  <li><b>The rules.</b> <code>shift_system</code> asks for a new post rather than a retouch: an obvious change, the subject and look kept, written in fresh words rather than the old sentences.</li>
+  <li><b>A check.</b> <code>write_edit</code> compares the reply word by word (<code>difflib</code>) with the source, the base prompts and tonight's earlier prompts. Above the variation's limit, it asks once more with <code>too_close()</code> and keeps whichever reply is further away. The rejected try is left out of the conversation.</li>
+</ul>
+<table>
+  <tr><th><code>[shift] variation</code></th><th>Directions per edit</th><th>Asked once more above</th><th>The extra sentence</th></tr>
+  <tr><td><code>subtle</code></td><td>1</td><td>90% the same</td><td>"Keep the change small but clearly visible."</td></tr>
+  <tr><td><code>bold</code> (default)</td><td>2</td><td>75%</td><td>"Make it a clearly different picture."</td></tr>
+  <tr><td><code>wild</code></td><td>3, the medium included</td><td>60%</td><td>"Be daring: it can surprise, as long as it is still recognisably theirs."</td></tr>
+</table>
+<p>Measured during development with the same two residents, by the same word-level <code>similarity()</code> the check uses: the first build's two nights (12 edits) were 47 to 98% the same as their sources, 79% on average. A test run of six <code>bold</code> edits came out 29 to 49% (mean 37%), and none needed the second ask. The next real night shift came out 36 to 53% (mean 40%). Every edit kept the resident's subject and style.</p>
+
+<!-- ============================================================ 10 -->
+<h2 id="llm">10. The language model</h2>
+<p><code>LanguageModel</code> (<code>angler/llm.py</code>) runs the language + vision model in-process through llama-cpp-python. The default is Google's Gemma 4 31B QAT GGUF (Q4_0, 17.7 GB, from <code>google/gemma-4-31B-it-qat-q4_0-gguf</code>) with its mmproj (1.2 GB), loaded with llama-cpp-python 0.3.36 in the build the installer picked for the GPU (HIP on this machine). The model is loaded only for a job and unloaded after it, so it holds no memory between jobs. Any Gemma 4 GGUF and its mmproj can stand in for the default; other model families can't, because <code>load()</code> always builds a <code>Gemma4ChatHandler</code> and <code>n_batch</code> is sized for Gemma 4's images.</p>
+<figure><svg id="d-llm"></svg>
+<figcaption>The life of a <code>LanguageModel</code>. <code>Engine.lm()</code> compares <code>[text]</code> with the config it was built from before every use; after an edit in Settings it unloads the old model and builds a new one, so dropping in a different GGUF needs no restart.</figcaption></figure>
+<script>
+D('d-llm', { w: 1000, h: 330,
+  nodes: [
+    { id: 'un', x: 20, y: 140, w: 140, h: 60, t: 'unloaded', s: '_llm is None', k: 'st', shape: 'pill' },
+    { id: 'loading', x: 230, y: 125, w: 250, h: 90, t: 'load()', s: 'Gemma4ChatHandler(mmproj)\nLlama(...) through _make()\nup to 4 tries, 8 s apart', k: 'llm' },
+    { id: 'ready', x: 560, y: 140, w: 170, h: 60, t: 'loaded', s: 'weights + KV on the GPU', k: 'st', shape: 'pill' },
+    { id: 'chat', x: 790, y: 125, w: 190, h: 90, t: 'chat(messages, …)', s: 'create_chat_completion\nunder an RLock\n→ the reply text', k: 'llm' },
+    { id: 'err', x: 230, y: 258, w: 250, h: 60, t: 'LLMError', s: '"could not be loaded; is the GPU\nmemory in use?"', k: 'st', shape: 'pill' },
+    { id: 'callers', x: 250, y: 8, w: 480, h: 52, t: 'who loads: Engine._read · Engine._shift (phase 1)', s: 'who unloads: the end of phase 1 · the worker’s finally · a [text] change', k: 'note', shape: 'note' },
+  ],
+  edges: [
+    { f: 'un', t: 'loading' }, { f: 'loading', t: 'ready' },
+    { f: 'ready:r', t: 'chat:l', two: true },
+    { f: 'loading:b', t: 'err:t', l: 'the 4th failure', lo: [58, 0] },
+    { f: 'ready:t.5', t: 'un:t.5', via: [[645, 90], [90, 90]], l: 'unload(): close() + gc.collect()' },
+  ] });
+</script>
+<table>
+  <tr><th>Setting (<code>[text]</code>)</th><th>Default</th><th>Why</th></tr>
+  <tr><td><code>model</code>, <code>mmproj</code></td><td>the 31B QAT GGUF and its projector</td><td>Wherever the files are; nothing is copied. <code>baitbook models</code> downloads them into <code>models/</code> in the home folder and sets their full paths; otherwise <code>baitbook setup</code> asks for them. A relative path is relative to the config file. Without <code>mmproj</code> there is no chat handler, and the vision read cannot see.</td></tr>
+  <tr><td><code>n_ctx</code></td><td>16384</td><td>A tested working size. A night conversation runs to 3 or 4 thousand tokens and a vision read to about 3.</td></tr>
+  <tr><td><code>n_batch</code></td><td>576</td><td>Also used as <code>n_ubatch</code>. Gemma 4 decodes an image in one micro-batch: 560 image tokens + 16.</td></tr>
+  <tr><td><code>swa_full</code></td><td>false</td><td>Keep only the sliding-window layers' window, not the whole context: 3.5 GB of KV cache at 16k instead of 12.8 GB, which Windows with HIP could fail to allocate (<a href="#gpu">section 12</a>).</td></tr>
+  <tr><td><code>use_mmap</code></td><td>true (not in the file)</td><td>Loading the 31B file fully into RAM failed while ComfyUI was running.</td></tr>
+  <tr><td><code>n_gpu_layers</code></td><td>-1</td><td>Everything on the GPU.</td></tr>
+  <tr><td><code>temperature</code>, <code>top_p</code>, <code>top_k</code>, <code>min_p</code>, <code>repeat_penalty</code></td><td>1.0 · 0.95 · 64 · 0.05 · 1.1</td><td>Tested sampling for Gemma 4. The vision read uses <code>read_temperature</code> (0.4) instead.</td></tr>
+</table>
+<ul>
+  <li><b>llama-cpp-python is optional.</b> It is the <code>llm</code> extra, built per GPU, and <code>load()</code> imports it only when a job needs the model. Without it everything else runs (the tests and CI never install it), and a job that needs the model fails with <code>LLMError</code>: "llama-cpp-python is not installed". <code>baitbook setup</code> checks for it and says whether it can use the GPU.</li>
+  <li><b>Images go in as data URIs.</b> <code>image_part(png)</code> base64-encodes the PNG master into an <code>image_url</code> part; the chat handler hands it to llama.cpp's projector.</li>
+  <li><b>The handler talks too much.</b> <code>MTMDChatHandler</code> prints the whole rendered prompt to stdout, so <code>Engine._chat</code> wraps every call in <code>redirect_stdout</code>. The native projector's own lines (image encode timings) still reach the console; they are harmless.</li>
+  <li><b>Why the retries.</b> GPU memory freed by ComfyUI, or by the previous load, comes back a moment after the call that freed it returns. A load straight after a swap can fail once with <code>ValueError</code>; <code>load()</code> waits 8 s and tries again, four times in all.</li>
+</ul>
+
+<!-- ============================================================ 11 -->
+<h2 id="image">11. The image model</h2>
+<p>The image model is FLUX.2 [klein] 4B by default (Apache 2.0, as safetensors; klein 9B works too, under a non-commercial licence, as safetensors or GGUF files; other image models don't, because <code>klein_i2i.json</code> is built from FLUX.2 nodes), and it only ever edits: every new image is made from an older one, with the source image passed in as a reference latent and the edit prompt describing the whole target image. It runs in ComfyUI, which is a separate server; <code>ComfyClient</code> (<code>angler/imagegen.py</code>) is the Angler's only contact with it.</p>
+<ul>
+  <li><b><code>alive()</code></b>: <code>GET /system_stats</code> answers. <b><code>ours()</code></b>: with <code>[image] comfy_base</code> set (baitbook's own ComfyUI), the ComfyUI answering must have been started with that <code>--base-directory</code>, which <code>/system_stats</code> reports in <code>argv</code>. Another ComfyUI on the port (the user's own, say) has none of baitbook's models or nodes: <code>ensure_running()</code> refuses it with a clear error, and <code>release()</code> leaves it alone. Without <code>comfy_base</code> any ComfyUI will do.</li>
+  <li><b><code>ensure_running()</code></b>: if nothing answers at <code>[image] comfy_url</code> and <code>comfy_autostart</code> is on, start <code>comfy_python main.py --listen 127.0.0.1 --port … --disable-auto-launch</code> (plus <code>--base-directory comfy_base</code> when set) in <code>comfy_dir</code>, with its output in <code>data/comfy.log</code>, and wait up to 180 s. The process is kept in the module global <code>_PROC</code>: that is how the Angler knows it started it.</li>
+  <li><b><code>edit(source_png, prompt, seed)</code></b>: upload the source to <code>/upload/image</code> with <code>type=temp</code>, fill the graph (<code>build</code>), <code>POST /prompt</code>, poll <code>/history/{id}</code> every second for up to 15 minutes, and fetch the first output image through <code>/view</code>. The source and the result (node 13 is <code>PreviewImage</code>, not <code>SaveImage</code>) both live in ComfyUI's temp folder, which ComfyUI empties each time it starts, so no copies pile up in its input or output folders after a resident is deleted or a snag is purged. A run that reports an error, or finishes without an image, raises <code>ImageGenError</code>.</li>
+  <li><b><code>release()</code></b>: give the GPU back. A ComfyUI the Angler started is terminated (waited up to 30 s, then killed). One started by someone else is only sent <code>POST /free</code> (and only if <code>ours()</code>) and left running. Why not always <code>/free</code>: <a href="#gpu">section 12</a>.</li>
+</ul>
+
+<h3 id="own-comfy">baitbook's own ComfyUI</h3>
+<p><code>baitbook comfyui</code> (<code>baitbook/comfyui.py</code>, also offered by <code>baitbook setup</code>) installs a ComfyUI just for baitbook, in <code>comfyui/</code> in the home folder. Each step is skipped when it's already done (only the requirements are checked again every time), so running it again repairs or upgrades:</p>
+<ul>
+  <li><b>The code:</b> a pinned release (<code>comfyui.VERSION</code>, 0.39.0), from its zip on GitHub (no git needed), in <code>comfyui/ComfyUI-&lt;version&gt;/</code>. No ComfyUI Manager: the Angler only uses the API.</li>
+  <li><b>Python:</b> a 3.13 environment of its own, <code>comfyui/.venv</code>, made with uv (the <code>uv</code> package is a dependency, for machines where uv isn't on PATH).</li>
+  <li><b>PyTorch,</b> as ComfyUI's README gives it for the GPU <code>gpu.detect()</code> finds (<code>BAITBOOK_GPU</code> or <code>--gpu</code> overrides it). It asks <code>nvidia-smi</code> first, then the display adapters' names (<code>Win32_VideoController</code> on Windows, <code>lspci</code> on Linux); on a Mac, Apple silicon means MPS. <code>BAITBOOK_GPU</code> takes <code>nvidia</code>, <code>amd</code>, <code>intel</code>, <code>mps</code> or <code>cpu</code>, and the install scripts' names too (<code>cuda</code>, <code>hip</code>, <code>metal</code>…):
+    <ul>
+      <li>NVIDIA: cu130, cu128 or cu126, by the driver's CUDA version (cu126 for 10-series cards and older). A driver below CUDA 12.6 is an error that says to update it;</li>
+      <li>AMD on Windows: AMD's ROCm 10 wheels, with only this GPU's kernels (<code>device-gfx1100</code>, say) when the name gives the architecture away, else <code>device-all</code>;</li>
+      <li>AMD on Linux: ROCm 7.2. Intel Arc: XPU. Apple silicon: the standard wheels (MPS). Anything else: CPU.</li>
+    </ul>
+    Afterwards it checks that PyTorch sees the GPU, and says so if it doesn't. <code>--torch</code> installs it again.</li>
+  <li><b>Then</b> ComfyUI's <code>requirements.txt</code>, and the ComfyUI-GGUF nodes (pinned commit) if an image model is a <code>.gguf</code>.</li>
+  <li><b>Where things go:</b> models, custom nodes and outputs live in <code>comfyui/</code> itself, which ComfyUI is started with as <code>--base-directory</code>, so a new version replaces only the code folder.</li>
+  <li><b>The config,</b> written last, once the rest has worked: <code>comfy_dir</code>, <code>comfy_python</code>, <code>comfy_base</code> and <code>comfy_url</code> (all <code>LOCAL_ONLY</code>). <code>comfy_url</code> keeps its port if that port is free and isn't 8188; otherwise it gets the first free one from 8190 (up to 8299). Never ComfyUI's default 8188, which a ComfyUI of the user's own is likely to be using.</li>
+</ul>
+<p>A ComfyUI the user already has works too: <code>baitbook setup</code> asks for its folder, or <code>comfy_dir</code> and <code>comfy_python</code> can be set by hand, with <code>comfy_base</code> left empty. <code>baitbook comfyui</code> was checked by hand on the owner's machine (<a href="#tests">section 22</a>).</p>
+
+<h3 id="get-models">Downloading the models</h3>
+<p><code>baitbook models</code> (<code>baitbook/models.py</code>, also offered by <code>baitbook setup</code> after the ComfyUI step) downloads the default models from Hugging Face, about 35 GB in all. They are Apache 2.0 and need no sign-in.</p>
+<ul>
+  <li><b>Pinned:</b> each file in <code>models.DEFAULTS</code> is fixed to a commit, with its size and sha256, so what lands is what was tested.</li>
+  <li><b>Where:</b> Gemma's GGUF and mmproj go into <code>models/</code> in the home folder. klein 4B, its text encoder and its VAE go into ComfyUI's models folder (under <code>comfy_base</code>, or <code>comfy_dir</code>), so they wait until there is a ComfyUI ("set up ComfyUI first").</li>
+  <li><b>Only what's missing:</b> a file already in place is only pointed at. A setting that names some other file (klein 9B, say) is the user's choice and is never replaced.</li>
+  <li><b>Room first:</b> each disk must have room for what's left to download, plus 1 GB to spare, or nothing is downloaded.</li>
+  <li><b>Resumable:</b> a download goes to <code>&lt;name&gt;.part</code>. The next run reads the <code>.part</code> again (so the sha256 covers the whole file), then asks for the rest with a <code>Range</code>; a server that sends the whole file instead starts it over. A lost connection is retried, up to 5 times in a row while nothing more arrives, waiting 2 s, then twice as long each time. Ctrl+C keeps the <code>.part</code>.</li>
+  <li><b>Checked, then used:</b> once the size and sha256 match, the <code>.part</code> is renamed into place and the setting points at it: the full path for <code>[text]</code>, the file name for <code>[image]</code>. A mismatch deletes the <code>.part</code>. A file that fails doesn't stop the others.</li>
+</ul>
+
+<h3 id="image-graph">The i2i graph</h3>
+<p><code>angler/workflows/klein_i2i.json</code> is a ComfyUI graph in API format, made for baitbook from ComfyUI's klein image-edit template. <code>ComfyClient.build</code> loads it, drops the <code>_comment</code> key, and fills in the files, the prompt, the uploaded source, the size, steps, cfg and seed from <code>[image]</code>. It also picks the loaders by file type: ComfyUI's own <code>UNETLoader</code> and <code>CLIPLoader</code> (type <code>flux2</code>) for <code>.safetensors</code>, or ComfyUI-GGUF's <code>UnetLoaderGGUF</code> and <code>CLIPLoaderGGUF</code> for <code>.gguf</code>, so a klein 9B GGUF setup still works.</p>
+<figure><svg id="d-graph"></svg>
+<figcaption>The graph, by ComfyUI node id. The source image becomes a reference latent on both the positive and the empty negative conditioning; the sampler starts from an empty latent of the configured output size (1024 × 1024 by default), so the output is square whatever the source was. Decoding is tiled unless <code>tiled_decode</code> is false, in which case <code>build</code> swaps in a plain <code>VAEDecode</code>.</figcaption></figure>
+<script>
+D('d-graph', { w: 1000, h: 520,
+  nodes: [
+    { id: 'n20', x: 20, y: 20, w: 170, h: 56, t: '20 · LoadImage', s: 'the uploaded source', k: 'image' },
+    { id: 'n21', x: 220, y: 20, w: 190, h: 56, t: '21 · ImageScaleToTotalPixels', s: 'reference_megapixels (1.0)', k: 'image', tpx: 12.5 },
+    { id: 'n23', x: 440, y: 20, w: 150, h: 56, t: '23 · VAEEncode', s: 'the reference latent', k: 'image' },
+    { id: 'n2', x: 20, y: 130, w: 170, h: 66, t: '2 · CLIPLoader', s: 'text_encoder: qwen_3_4b\n(.gguf: CLIPLoaderGGUF)', k: 'image' },
+    { id: 'n4', x: 220, y: 110, w: 190, h: 50, t: '4 · CLIPTextEncode', s: 'the edit prompt', k: 'image' },
+    { id: 'n5', x: 220, y: 172, w: 190, h: 50, t: '5 · CLIPTextEncode', s: '"" (empty)', k: 'image' },
+    { id: 'n31', x: 440, y: 110, w: 150, h: 50, t: '31 · ReferenceLatent', s: 'positive', k: 'image', tpx: 12.5 },
+    { id: 'n32', x: 440, y: 172, w: 150, h: 50, t: '32 · ReferenceLatent', s: 'negative', k: 'image', tpx: 12.5 },
+    { id: 'n1', x: 20, y: 250, w: 170, h: 66, t: '1 · UNETLoader', s: 'unet: klein 4B\n(.gguf: UnetLoaderGGUF)', k: 'image' },
+    { id: 'n3', x: 20, y: 440, w: 170, h: 56, t: '3 · VAELoader', s: 'vae: flux2-vae', k: 'image' },
+    { id: 'n10', x: 620, y: 130, w: 160, h: 66, t: '10 · CFGGuider', s: 'cfg (1.0)', k: 'image' },
+    { id: 'n7', x: 620, y: 20, w: 160, h: 56, t: '7 · RandomNoise', s: 'the post’s seed', k: 'image' },
+    { id: 'n8', x: 220, y: 300, w: 190, h: 50, t: '8 · KSamplerSelect', s: 'euler', k: 'image' },
+    { id: 'n9', x: 220, y: 370, w: 190, h: 56, t: '9 · Flux2Scheduler', s: 'steps (4) · width · height', k: 'image' },
+    { id: 'n6', x: 440, y: 370, w: 150, h: 56, t: '6 · EmptyFlux2Latent', s: 'width × height', k: 'image', tpx: 12.5 },
+    { id: 'n11', x: 810, y: 130, w: 170, h: 66, t: '11 · SamplerCustom\nAdvanced', s: 'the denoise', k: 'image', tpx: 12.5 },
+    { id: 'n12', x: 810, y: 300, w: 170, h: 56, t: '12 · VAEDecodeTiled', s: 'tile_size (512)', k: 'image' },
+    { id: 'n13', x: 810, y: 440, w: 170, h: 56, t: '13 · PreviewImage', s: 'ComfyUI\'s temp folder', k: 'image' },
+  ],
+  edges: [
+    { f: 'n20', t: 'n21' }, { f: 'n21', t: 'n23' },
+    { f: 'n2:r.3', t: 'n4:l' }, { f: 'n2:r.7', t: 'n5:l' },
+    { f: 'n4', t: 'n31' }, { f: 'n5', t: 'n32' },
+    { f: 'n23:b.3', t: 'n31:t.3' }, { f: 'n23:b.8', t: 'n32:t.8', via: [[560, 92], [600, 92], [600, 166], [560, 166]], none: false },
+    { f: 'n31:r', t: 'n10:l.3' }, { f: 'n32:r', t: 'n10:l.75' },
+    { f: 'n1:r', t: 'n10:b.3', via: [[668, 283]], l: 'model', lo: [-170, 0] },
+    { f: 'n3:l', t: 'n23:t.5', via: [[8, 468], [8, 8], [515, 8]], d: true, l: 'vae', lo: [0, 0] },
+    { f: 'n3:r', t: 'n12:l.5', via: [[790, 468], [790, 328]], d: true, l: 'vae', lo: [0, 0] },
+    { f: 'n7:r', t: 'n11:t.3', via: [[861, 48]] },
+    { f: 'n10', t: 'n11' },
+    { f: 'n8:t.9', t: 'n11:b.1', via: [[391, 270], [827, 270]] },
+    { f: 'n9:r', t: 'n11:b.5', via: [[612, 398], [612, 240], [895, 240]] },
+    { f: 'n6:r', t: 'n11:b.85', via: [[605, 380], [605, 250], [954, 250]] },
+    { f: 'n11:b.15', t: 'n12:t.15' },
+    { f: 'n12:b.5', t: 'n13:t.5' },
+  ] });
+</script>
+<table>
+  <tr><th>Filled from <code>[image]</code></th><th>Into</th></tr>
+  <tr><td><code>unet</code> · <code>text_encoder</code> · <code>vae</code></td><td>nodes 1, 2, 3. File names inside ComfyUI's model folders (or a folder its <code>extra_model_paths.yaml</code> maps). A <code>.gguf</code> name swaps node 1 or 2 for its GGUF loader.</td></tr>
+  <tr><td><code>width</code> · <code>height</code></td><td>nodes 6 and 9: the output size (1024 × 1024).</td></tr>
+  <tr><td><code>steps</code> · <code>cfg</code></td><td>nodes 9 and 10: 4 and 1.0 for the distilled model.</td></tr>
+  <tr><td><code>reference_megapixels</code></td><td>node 21: how big the source is scaled before encoding.</td></tr>
+  <tr><td><code>tiled_decode</code> · <code>tile_size</code></td><td>node 12.</td></tr>
+  <tr><td>per call: the prompt · the uploaded file name · the seed</td><td>nodes 4, 20 and 7.</td></tr>
+</table>
+
+<!-- ============================================================ 12 -->
+<h2 id="gpu">12. GPU memory: the series rule</h2>
+<p>A GPU that shares memory with the CPU can report far more memory than an 18 GB language model and a 16 GB image model (20 GB for klein 9B) need together. In practice, on Windows with HIP, a large single allocation can fail while the other process holds memory, however much is free overall. So the rule is: <b>one model on the GPU at a time</b>. A night shift writes everything first, gives the GPU back, then renders.</p>
+<figure><svg id="d-gpu"></svg>
+<figcaption>Who holds the GPU through one night shift. The image model's ComfyUI is stopped before the language model loads and again after the last edit, so between jobs the GPU is empty. A vision read is the first half alone. The times were measured on this machine, the edits with klein 9B.</figcaption></figure>
+<script>
+D('d-gpu', { w: 1000, h: 250,
+  nodes: [
+    { id: 'a', x: 20, y: 60, w: 140, h: 70, t: 'release()', s: 'stop the Angler’s\nComfyUI', k: 'image' },
+    { id: 'b', x: 180, y: 60, w: 250, h: 70, t: 'phase 1: Gemma 4 31B', s: '≈ 18 GB of weights + 3.5 GB KV\nloads in 10–20 s · ≈ 25 s per post', k: 'llm' },
+    { id: 'c', x: 450, y: 60, w: 110, h: 70, t: 'unload()', s: 'close + gc', k: 'llm' },
+    { id: 'd', x: 580, y: 60, w: 250, h: 70, t: 'phase 2: klein 4B', s: 'DiT ≈ 8 GB + text encoder ≈ 8 GB\nstarts with ComfyUI · 30–100 s per edit', k: 'image' },
+    { id: 'e', x: 850, y: 60, w: 130, h: 70, t: 'release()', s: 'stop it again', k: 'image' },
+    { id: 'free1', x: 20, y: 170, w: 140, h: 50, t: 'GPU: empty', k: 'st', shape: 'pill' },
+    { id: 'gem', x: 180, y: 170, w: 250, h: 50, t: 'GPU: Gemma', k: 'st', shape: 'pill' },
+    { id: 'free2', x: 450, y: 170, w: 110, h: 50, t: 'empty', k: 'st', shape: 'pill' },
+    { id: 'kle', x: 580, y: 170, w: 250, h: 50, t: 'GPU: klein', k: 'st', shape: 'pill' },
+    { id: 'free3', x: 850, y: 170, w: 130, h: 50, t: 'empty', k: 'st', shape: 'pill' },
+  ],
+  texts: [{ x: 20, y: 30, t: 'one night shift, left to right', wt: 600 }],
+  edges: [{ f: 'a', t: 'b' }, { f: 'b', t: 'c' }, { f: 'c', t: 'd' }, { f: 'd', t: 'e' }] });
+</script>
+<table>
+  <tr><th>What happened in development (Windows, HIP)</th><th>Why</th><th>What the code does</th></tr>
+  <tr><td class="wrap">llama.cpp could not allocate a 12.8 GB KV buffer at 16k context (6.4 GB at 8k), with ComfyUI holding klein.</td><td>A full-size sliding-window cache, as one large allocation.</td><td><code>swa_full = false</code> in <code>llm.py</code>: 3.5 GB of KV in smaller pieces.</td></tr>
+  <tr><td class="wrap">Loading Gemma with <code>use_mmap = false</code> failed.</td><td>An 18.7 GB copy into about 34 GB of system RAM, part of it used by ComfyUI.</td><td><code>use_mmap</code> defaults to true.</td></tr>
+  <tr><td class="wrap">ComfyUI: "HIP out of memory, tried to allocate 4.50 GiB … 82.02 GiB is free" in the VAE decode, then a crash.</td><td>The same refusal of a large single allocation.</td><td>The graph decodes with <code>VAEDecodeTiled</code>.</td></tr>
+  <tr><td class="wrap">ComfyUI died with an access violation inside <code>unload_all_models</code> after <code>POST /free</code>.</td><td>A crash in this ROCm build's unload path.</td><td><code>release()</code> stops the Angler's own ComfyUI instead of asking it to unload; a process exit always returns the memory.</td></tr>
+  <tr><td class="wrap">A load straight after a swap failed once, then worked.</td><td>Freed memory comes back a moment late.</td><td><code>LanguageModel.load</code> retries 4 times, 8 s apart; <code>release</code> waits 2–3 s.</td></tr>
+</table>
+<div class="callout info"><b>They can coexist.</b> With the tiled decode, a one-off test ran a klein edit while Gemma stayed loaded, and it worked (105 s). baitbook runs them in series anyway: it is simpler, it survives the crashes above, and a night shift has hours to spare.</div>
+
+<!-- ============================================================ 13 -->
+<h2 id="storage">13. Storage</h2>
+<p>Everything the Angler keeps is in <code>data/</code> in the home folder (<code>config.DATA</code>, <a href="#home">section 14</a>): one SQLite file and one folder of images. <code>db.py</code> opens the database once per process (<code>check_same_thread = False</code>, WAL mode, one <code>RLock</code> around every statement) and runs the schema on every start. Migrations are columns added in place: <code>conn()</code> adds each column in <code>ADDED</code> (<code>devices.role</code>, <code>posts.snagged_at</code>) to a database made before it. First, <code>backup()</code> copies the database as it was to <code>data/backups/baitbook-&lt;date&gt;-&lt;time&gt;.db</code> with SQLite's backup API, since even a source checkout runs on the owner's own data. Only a change makes a copy: a new database is made whole by the schema.</p>
+<figure><svg id="d-schema"></svg>
+<figcaption>The tables in <code>data/baitbook.db</code>, and the image files a post points at. A post's <code>image</code> is a 16-hex-digit stem; the files are named after it.</figcaption></figure>
+<script>
+D('d-schema', { w: 1000, h: 470,
+  nodes: [
+    { id: 'res', x: 20, y: 50, w: 300, h: 150, t: 'residents', s: 'id (slug of the first handle) · name · handle\nbio · hue · moods (JSON list)\nstatus: reading → ready, or failed\ncreated_at', k: 'store' },
+    { id: 'posts', x: 360, y: 50, w: 340, h: 190, t: 'posts', s: 'id · resident_id · kind: seed | edit\nsource_id: the post it was edited from\nprompt · caption · tags (JSON)\nimage (a file stem) · seed · shift_id (0 = seed)\nvote: -1 | 0 | 1 · voted_at · voted_by\nsnagged_at (a broken render) · created_at', k: 'store' },
+    { id: 'shifts', x: 740, y: 50, w: 240, h: 120, t: 'shifts', s: 'id (the night number) · trigger\nstarted_at · finished_at\nstatus: running, then done,\nfailed or interrupted\nn_posts · error', k: 'store' },
+    { id: 'dev', x: 20, y: 260, w: 300, h: 80, t: 'devices', s: 'token (the key) · name\nrole: device | owner\ncreated_at · last_dock_at', k: 'trust' },
+    { id: 'docks', x: 20, y: 390, w: 300, h: 60, t: 'docks', s: 'device · at · up (votes) · down (posts)', k: 'store' },
+    { id: 'events', x: 740, y: 195, w: 240, h: 80, t: 'events', s: 'the journal: at · kind · text\nresident_id', k: 'store' },
+    { id: 'img', x: 360, y: 300, w: 620, h: 150, t: 'data/images/', s: '<stem>.png: the master, what the image model edits\n<stem>.jpg: ≤ 1024 px, quality 86, for the feeds\n<stem>_t.jpg: a 320 px square, quality 82, for grids and the reef\navg_color(stem): the thumbnail’s average colour (cached), for reef branches', k: 'store', shape: 'cyl' },
+  ],
+  edges: [
+    { f: 'posts:l.25', t: 'res:r.25', l: 'resident_id' },
+    { f: 'posts:t.8', t: 'posts:t.6', via: [[632, 22], [564, 22]], l: 'source_id' },
+    { f: 'posts:r.2', t: 'shifts:l.3', l: 'shift_id' },
+    { f: 'posts:b.5', t: 'img:t.274', l: 'image (stem)', lo: [48, 0] },
+    { f: 'dev:b.5', t: 'docks:t.5', l: 'one row per dock', lo: [62, 0] },
+  ] });
+</script>
+<ul>
+  <li><b>A vote is a number on the post.</b> −1, 0 or 1, with when and by whom (<code>"pc"</code> for this machine, or the paired device's name). <code>db.vote</code> only lets a vote through if it was made at or after the stored <code>voted_at</code>, so a phone docking late can't undo a newer vote; a time in the future counts as now. There is no vote history.</li>
+  <li><b>A snag is a time on the post, not a vote.</b> <code>snagged_at</code> keeps the vote as it was, so undoing a snag restores it. A snagged row stays after <code>purge_snags()</code> has deleted its files and nulled its <code>image</code> (<a href="#snags">section 8</a>).</li>
+  <li><b>Seeds are posts.</b> <code>kind = 'seed'</code>, <code>shift_id = 0</code>, prompt filled in by the vision read. They are never voted on and are the roots of every edit chain.</li>
+  <li><b>Deleting a resident</b> (<code>DELETE /api/residents/{id}</code>) deletes their posts and every image file, through <code>db.delete_resident</code> and <code>media.delete</code>.</li>
+  <li><b>Everything that comes in becomes a PNG.</b> <code>media.save</code> applies the EXIF rotation, writes the PNG master and both JPEG variants, and returns the stem. The apps only ask for the JPEGs, though <code>/media/</code> would serve a PNG master too; <code>media.path</code> serves any file directly inside <code>data/images/</code> and refuses every other name.</li>
+</ul>
+
+<!-- ============================================================ 14 -->
+<h2 id="config">14. Configuration</h2>
+<p>Every setting is in <code>baitbook.toml</code>, in the home folder (<a href="#home">below</a>). <code>config.load()</code> reads it once at start; after that, code asks <code>config.section(name)</code> each time it needs a value, and gets a copy. The PC app's Settings and Night shift views change it through <code>PUT /api/config</code>, which only the owner may call, and <code>baitbook setup</code>, <code>baitbook comfyui</code> and <code>baitbook models</code> fill in the model and ComfyUI paths. Edit it by hand only while the Angler is stopped (<code>baitbook stop</code>): a running one doesn't read it again.</p>
+<table>
+  <tr><th>Section</th><th>What is in it</th><th>Takes effect</th></tr>
+  <tr><td><code>[server]</code></td><td>host (0.0.0.0, so phones can reach it), port 8787, <code>ssl_certfile</code> / <code>ssl_keyfile</code>, <code>local_port</code> 8788 (with HTTPS on, the PC app's plain-HTTP port on 127.0.0.1)</td><td>on restart</td></tr>
+  <tr><td><code>[text]</code></td><td>name, model, mmproj, n_ctx, n_batch, n_gpu_layers, swa_full, sampling, read_temperature</td><td>the next job (<code>Engine.lm()</code> rebuilds the model)</td></tr>
+  <tr><td><code>[image]</code></td><td>name; comfy_url, comfy_dir, comfy_python, comfy_base, comfy_autostart; unet, text_encoder, vae; width, height, steps, cfg, reference_megapixels, tiled_decode, tile_size; primer_file</td><td>the next job (<code>Engine.comfy()</code> rebuilds the client)</td></tr>
+  <tr><td><code>[shift]</code></td><td>posts_per_resident, good_examples (5), bad_examples (3; 0 leaves them out), variation (subtle, bold, wild: <a href="#variation">section 9</a>), schedule_enabled, schedule_time, catch_up_hours (<a href="#schedule">section 21</a>)</td><td>the next shift; the schedule within 20 s</td></tr>
+  <tr><td><code>[device]</code></td><td>keep_nights (7)</td><td>the next dock</td></tr>
+  <tr><td><code>[app]</code></td><td>angler_url: which Angler <code>pcapp</code> opens (empty = this machine)</td><td>the next time the PC app starts</td></tr>
+</table>
+<ul>
+  <li><b>Only some keys can be changed from the app.</b> <code>config.EDITABLE</code> lists them with their types; <code>update()</code> refuses anything else, casts each value (booleans accept "on", "true", "1", "yes"), normalises <code>schedule_time</code> to <code>HH:MM</code> (refusing a time that isn't one, like 25:99), checks <code>variation</code> against <code>VARIATIONS</code>, refuses a number that isn't finite, keeps <code>catch_up_hours</code> between 0 and 24 and the example counts between 0 and 10 (<code>CLAMPS</code>), and refuses a value outside <code>LIMITS</code>: posts per resident 1 to 100, width and height 64 to 4096, steps 1 to 200, keep_nights 1 to 365, and so on. A value past those would stop the schedule, the shift or the models. It is all or nothing: every value is checked (<code>_check()</code>) before any is written, so a change with one bad value saves none of it.</li>
+  <li><b>Keys only this machine can write.</b> <code>[image] comfy_dir</code>, <code>comfy_python</code>, <code>comfy_base</code> and <code>comfy_url</code> say which program the Angler runs and talks to, so they are in <code>config.LOCAL_ONLY</code>, not <code>EDITABLE</code>. <code>baitbook setup</code> (which writes the model paths the same way) and <code>baitbook comfyui</code> write them with <code>update(…, local=True)</code>; <code>PUT /api/config</code> refuses them, even from the owner.</li>
+  <li><b>Which ComfyUI.</b> <code>comfy_dir</code> is the code folder (the one with <code>main.py</code>) and <code>comfy_python</code> its environment's Python. <code>comfy_base</code> is ComfyUI's <code>--base-directory</code>, where its models, custom nodes and outputs live; empty means <code>comfy_dir</code>. For a ComfyUI of the user's own, <code>comfy_url</code> is wherever it listens; the example has ComfyUI's default, <code>http://127.0.0.1:8188</code>. For baitbook's own, <code>baitbook comfyui</code> sets all four: <code>comfy_base</code> to <code>comfyui/</code> and <code>comfy_url</code> to a free port from 8190 (<a href="#own-comfy">section 11</a>). With <code>comfy_base</code> set, the Angler only uses a ComfyUI started with it (<code>ours()</code>).</li>
+  <li><b>The image defaults are klein 4B.</b> The example's <code>[image]</code> names klein 4B's safetensors (<code>flux-2-klein-4b.safetensors</code>, <code>qwen_3_4b.safetensors</code>, <code>flux2-vae.safetensors</code>), the files <code>baitbook models</code> downloads. A setup that names other files instead (klein 9B as GGUF files, say) is left alone by <code>baitbook models</code>, and <code>baitbook comfyui</code> adds the ComfyUI-GGUF nodes for <code>.gguf</code> files.</li>
+  <li><b>The first run copies the example.</b> With no <code>baitbook.toml</code>, <code>config.load()</code> copies <code>baitbook.example.toml</code> (<code>config.EXAMPLE_PATH</code>) into the home folder. Any key or section the file leaves out, as an older or hand-written one may, takes the example's value, in memory only. A UTF-8 byte order mark at the start is fine (Windows PowerShell and older Notepad write one).</li>
+  <li><b>Paths are relative to the config file.</b> <code>config.path()</code> turns a setting into a path: absolute, with <code>~</code> expanded, or else relative to the folder the config file is in. The model files, <code>comfy_dir</code>, <code>comfy_python</code>, <code>comfy_base</code>, <code>primer_file</code> and the HTTPS certificate and key all go through it.</li>
+  <li><b>A second Angler can run beside the first.</b> <code>BAITBOOK_HOME</code> gives it another home, or <code>BAITBOOK_CONFIG</code> and <code>BAITBOOK_DATA</code> another config file and data folder (and <code>--port</code> another port). The tests point all three at a temporary folder and give every test an empty home of its own; the hand-run checks in <a href="#tests">section 22</a> ran against a copy of the data.</li>
+  <li><b>The file keeps its comments.</b> <code>update()</code> does not rewrite the whole file: <code>_write_value</code> finds the one <code>key = value</code> line inside its section and replaces the value, keeping the comment column. A missing key is inserted under its section header (which may carry a comment too), and a missing section is added at the end.</li>
+</ul>
+
+<h3 id="home">The home folder</h3>
+<p>A user's config and data live in one folder of their own, <code>config.HOME</code>, outside the install, so upgrading or reinstalling never touches them. baitbook's own ComfyUI and the downloaded Gemma files go there too. <code>BAITBOOK_HOME</code> moves it. <code>baitbook status</code> shows where it is, and so does Settings on this machine (<code>/api/status</code> gives <code>paths</code> only to this machine).</p>
+<table>
+  <tr><th>System</th><th>The home folder</th></tr>
+  <tr><td>Windows</td><td><code>%LOCALAPPDATA%\baitbook</code></td></tr>
+  <tr><td>macOS</td><td><code>~/Library/Application Support/baitbook</code></td></tr>
+  <tr><td>Linux</td><td><code>~/.local/share/baitbook</code> (<code>$XDG_DATA_HOME/baitbook</code> if that is set)</td></tr>
+  <tr><td>inside it</td><td class="wrap"><code>baitbook.toml</code>, and <code>data/</code> (<code>config.DATA</code>): <code>baitbook.db</code>, <code>images/</code>, <code>angler.log</code> (and <code>angler.log.1</code>), <code>comfy.log</code>, <code>webview/</code> (the PC app window's storage), <code>angler.lock</code> and <code>backups/</code> (the database as it was before each schema change)</td></tr>
+  <tr><td>once set up</td><td class="wrap"><code>comfyui/</code>: baitbook's own ComfyUI (<code>baitbook comfyui</code>, <a href="#own-comfy">section 11</a>). The code is in <code>ComfyUI-&lt;version&gt;/</code> and its Python in <code>.venv/</code>. <code>comfyui/</code> is also ComfyUI's <code>--base-directory</code>, so <code>models/</code> (klein's files), <code>custom_nodes/</code> and the outputs sit beside them. And <code>models/</code>: the Gemma GGUF and mmproj from <code>baitbook models</code> (<a href="#get-models">section 11</a>).</td></tr>
+</table>
+
+<!-- ============================================================ 15 -->
+<h2 id="api">15. The HTTP API</h2>
+<p>Everything is in <code>angler/server.py</code>: one FastAPI app, JSON in and out. Every <code>/api/</code> and <code>/media/</code> route except pairing and shutdown starts with <code>client(request)</code>, which says who is calling (<a href="#trust">section 16</a>). Errors come back as <code>{"error": "…"}</code> with the status code, through one exception handler, and <code>api.js</code> turns them into a thrown <code>Error</code> carrying <code>status</code>. No handler touches a model. Anything slow is a job on the engine (<a href="#worker">section 5</a>).</p>
+<table>
+  <tr><th>Route</th><th>Who may call</th><th>What it does</th><th>Used by</th></tr>
+  <tr><td><code>GET /api/status</code></td><td>any client</td><td><code>engine.snapshot()</code> (state, phase, items, queue, next run), counts (with every snag ever, for the snag rate), model names, and <code>owner</code>. Only the owner also gets the pairing code, the paired devices, the LAN addresses and <code>tailscale_url</code> (the phone app's address through <code>tailscale serve</code>, or null), and only this machine gets <code>paths</code>: where the config and data are. <code>code</code> is <code>config.code_version()</code> as the Angler started (a hash of <code>angler/</code>'s Python), <code>stale</code> says the files on disk have changed since, and <code>background</code> says it was started with <code>--background</code>, as <code>pcapp</code> starts it.</td><td>PC app, every 1.5 s while a job runs and every 8 s otherwise; <code>baitbook status</code>, <code>baitbook stop</code></td></tr>
+  <tr><td><code>GET /api/config</code></td><td>any client</td><td>The keys in <code>config.EDITABLE</code>, and nothing else.</td><td>Settings, Night shift</td></tr>
+  <tr><td><code>PUT /api/config</code></td><td>the owner</td><td><code>config.update(changes)</code>; a bad key or value is a 400.</td><td>Settings, Night shift</td></tr>
+  <tr><td><code>GET /api/residents</code></td><td>any client</td><td>Every resident with their seed posts and post, vote and bite counts.</td><td>PC app, at start and after each job</td></tr>
+  <tr><td><code>POST /api/residents</code></td><td>the owner</td><td>Multipart: name, handle, bio, 1 to 8 images. Saves the seeds and queues the vision read (<a href="#read">section 6</a>).</td><td>Residents</td></tr>
+  <tr><td><code>PATCH /api/residents/{id}</code></td><td>the owner</td><td>Name, handle, bio, mood tags. The id stays, so posts and links still find the resident. A handle is refused if another resident has it, ignoring case and punctuation (the same rule as a new resident's). Tags given as text go through <code>parse_tags</code>.</td><td>Residents</td></tr>
+  <tr><td><code>DELETE /api/residents/{id}</code></td><td>the owner</td><td>The resident, their posts and every image file.</td><td>Residents</td></tr>
+  <tr><td><code>POST /api/residents/{id}/read</code></td><td>the owner</td><td>Runs the vision read again: after a failed one, or to rewrite the base prompts and tags. A 409 if one is already queued or running.</td><td>Residents ("Read again", "re-read")</td></tr>
+  <tr><td><code>GET /api/residents/{id}/memory</code></td><td>any client</td><td>A fresh <code>engine.context()</code> draw: the system prompt a shift would send now, which bites and throw-backs it sampled, and all of them.</td><td>Memory</td></tr>
+  <tr><td><code>GET /api/residents/{id}/graph</code></td><td>any client</td><td>Every post of the resident as a Reef node: id, source, night, vote, image, average colour.</td><td>Reef</td></tr>
+  <tr><td><code>GET /api/posts</code></td><td>any client</td><td>Posts, newest first, filtered by <code>resident</code>, <code>kind</code>, <code>days</code> (seeds always pass) and <code>limit</code>. Snags are left out, as everywhere (<code>LIVE</code> in <code>server.py</code>); <code>snagged=true</code> lists only them.</td><td>Feed (<code>days=7</code>), Ledger</td></tr>
+  <tr><td><code>GET /api/posts/{id}</code></td><td>any client</td><td>One post plus its <code>chain</code>: every image it descends from, seed first.</td><td>Feed's prompt panel</td></tr>
+  <tr><td><code>POST /api/votes</code></td><td>any client</td><td><code>{votes: [{id, vote, at?}]}</code>. Sets each vote, with <code>voted_by</code> = the caller's name.</td><td>PC app</td></tr>
+  <tr><td><code>POST /api/posts/{id}/snag</code></td><td>any client</td><td><code>{snag: true}</code> snags an edit (a 404 for a seed); <code>{snag: false}</code> undoes it, or answers 409 once the night shift has cleared its images.</td><td>PC app (the snag button, its undo, the Ledger)</td></tr>
+  <tr><td><code>POST /api/shift</code></td><td>the owner</td><td>Queues a manual night shift. Refused if one is already queued or running.</td><td>Night shift</td></tr>
+  <tr><td><code>POST /api/shutdown</code></td><td>this machine only</td><td>Stops the Angler: answers, then sets <code>should_exit</code> on its servers. The shutdown hook stops a ComfyUI the Angler started. A 403 from anywhere else, a paired owner included (<a href="#boot">section 4</a>).</td><td><code>baitbook stop</code></td></tr>
+  <tr><td><code>GET /api/shifts</code>, <code>GET /api/journal</code></td><td>any client</td><td>The last 30 shifts; the last 80 journal events.</td><td>Night shift</td></tr>
+  <tr><td><code>POST /api/pair</code></td><td>anyone with the code</td><td><code>{code, name, role?}</code> → a token: a device's, or with <code>role: "owner"</code> an owner's. 403 for a wrong code, 429 while pairing is paused (<a href="#trust">section 16</a>).</td><td>phone, a PC app on another machine</td></tr>
+  <tr><td><code>POST /api/unpair</code></td><td>a paired device</td><td>Deletes the caller's own token.</td><td>phone ("unpair")</td></tr>
+  <tr><td><code>DELETE /api/devices/{id}</code></td><td>the owner</td><td>Removes a paired device; its token stops working.</td><td>Settings</td></tr>
+  <tr><td><code>POST /api/dock</code></td><td>any client</td><td>Votes and snags up, the catch down, one round trip (<a href="#dock">section 19</a>).</td><td>phone</td></tr>
+  <tr><td><code>GET /media/{name}</code></td><td>any client</td><td>An image file from <code>data/images/</code>, cached by the browser for a year (the names never change).</td><td>both apps</td></tr>
+  <tr><td><code>GET /device/sw.js</code></td><td>anyone</td><td>The service worker, with <code>VERSION</code> set to <code>shell_version()</code>, a hash of <code>web/device/</code> and <code>web/shared/</code>, and <code>no-cache</code> (<a href="#device">section 18</a>). A route of its own, ahead of the static mount.</td><td>the phone</td></tr>
+  <tr><td><code>/app/</code>, <code>/device/</code>, <code>/shared/</code></td><td>anyone</td><td>The two apps' static files, from <code>config.WEB</code>. <code>/</code> redirects to <code>/app/</code>.</td><td>the browser</td></tr>
+</table>
+<ul>
+  <li><b>"Any client" means this machine or a paired device.</b> Anything else gets a 401 before the route runs. <b>"The owner"</b> is this machine or a PC app paired as the owner; <code>owner(request)</code> gives a phone a 403.</li>
+  <li><b>A vote is a value, not a toggle.</b> The toggling happens in the apps; the API only stores −1, 0 or 1. Sending the same vote twice changes nothing, which is what makes a failed dock safe to repeat.</li>
+</ul>
+
+<!-- ============================================================ 16 -->
+<h2 id="trust">16. Trust and pairing</h2>
+<p>There are no accounts, and there are two kinds of caller. <b>The owner</b> is this machine, asked directly, or a PC app on another machine that paired as the owner. <b>A device</b> is a paired phone: it can read, vote and dock, but not steer. <code>client(request)</code> decides who is calling, from where the request came from and the token it carries; <code>owner(request)</code> guards the owner's routes.</p>
+<figure><svg id="d-trust"></svg>
+<figcaption><code>client()</code> and <code>is_local()</code> in <code>server.py</code>. Every owner's route calls <code>owner(request)</code>, which turns a device away with a 403. The seed-image upload is checked earlier, by the <code>BodyLimit</code> middleware, before any of its body is read. Pairing and shutdown are the two API routes that do not call <code>client()</code>: the code is pairing's check, and <code>is_local()</code> alone is shutdown's.</figcaption></figure>
+<script>
+D('d-trust', { w: 1000, h: 360,
+  nodes: [
+    { id: 'req', x: 20, y: 150, w: 140, h: 60, t: 'a request', s: 'to /api/… or /media/…', k: 'plain' },
+    { id: 'cl', x: 190, y: 120, w: 250, h: 120, t: 'client() → is_local()?', s: 'the peer is 127.0.0.1 · ::1 · localhost\nthe Host header is too\nno proxy headers (Forwarded, X-Forwarded-\nFor, X-Real-IP, Tailscale-User-Login …)\nnot a page from another origin', k: 'trust' },
+    { id: 'pc', x: 500, y: 20, w: 300, h: 60, t: 'name "pc" · the owner', s: 'this machine, asked directly: every route', k: 'st', shape: 'pill' },
+    { id: 'tok', x: 500, y: 140, w: 260, h: 80, t: 'db.device(token)', s: 'the token from the X-Baitbook-Token\nheader, or ?t= (image URLs,\nsince an img tag can’t send headers)', k: 'trust' },
+    { id: 'no', x: 830, y: 150, w: 150, h: 60, t: '401', s: '"pair this device first"', k: 'trust', shape: 'pill' },
+    { id: 'own', x: 470, y: 272, w: 200, h: 64, t: 'role "owner"', s: 'a PC app on another\nmachine: every route', k: 'st', shape: 'pill' },
+    { id: 'dev', x: 690, y: 272, w: 290, h: 64, t: 'role "device"', s: 'a phone: reads · votes · dock\nthe owner’s routes → 403', k: 'st', shape: 'pill' },
+    { id: 'pairnote', x: 20, y: 276, w: 420, h: 60, t: 'POST /api/pair skips client(): it needs the code', s: '5 wrong codes → a new code and a minute’s pause · static files need nothing', k: 'note', shape: 'note' },
+  ],
+  edges: [
+    { f: 'req', t: 'cl' },
+    { f: 'cl:t.5', t: 'pc:l.5', via: [[315, 50]], l: 'yes' },
+    { f: 'cl:r', t: 'tok:l', l: 'no' },
+    { f: 'tok:r', t: 'no:l', l: 'unknown', lo: [0, -16] },
+    { f: 'tok:b.3', t: 'own:t.55', l: 'found' },
+    { f: 'tok:b.8', t: 'dev:t.2' },
+  ] });
+</script>
+<figure><svg id="d-pair"></svg>
+<figcaption>Pairing a phone, once. A PC app on another machine does the same from its own pairing screen, sending <code>role: "owner"</code>. The code lives only in memory: every start of the Angler makes a new one, and devices already paired keep working because their tokens are in the database.</figcaption></figure>
+<script>
+S('d-pair', { w: 1000, row: 34,
+  actors: [{ id: 'pc', t: 'PC app\n(Settings)', k: 'pc' }, { id: 'api', t: 'server.py', k: 'api' }, { id: 'st', t: 'db.py', k: 'store' },
+           { id: 'ph', t: 'phone\n(device.js)', k: 'device' }, { id: 'ls', t: 'localStorage\nbaitbook.angler', k: 'device' }],
+  steps: [
+    { note: 'pair_code(): 6 random digits, made on first use\n(and printed in the console at start)', over: ['api', 'st'] },
+    { f: 'pc', t: 'api', l: 'GET /api/status' },
+    { f: 'api', t: 'pc', l: 'pair_code · lan_urls · tailscale_url · devices (only for the owner)', d: true },
+    { note: 'the phone opens a LAN address;\nno token yet, so the pair screen', over: ['ph', 'ls'] },
+    { f: 'ph', t: 'api', l: 'POST /api/pair {code, name}' },
+    { f: 'api', t: 'api', l: 'paused? 429 · wrong code? 403, and the 5th in a row\nmakes a new code and pauses pairing for a minute' },
+    { f: 'api', t: 'st', l: 'add_device(token_urlsafe(24), name, role) · event(device)' },
+    { f: 'api', t: 'ph', l: '{token, name, role: "device"}', d: true },
+    { f: 'ph', t: 'ls', l: 'remember(base, token, name)' },
+    { f: 'ph', t: 'api', l: 'from now on: X-Baitbook-Token on every call' },
+  ] });
+</script>
+<p>What this does and does not protect:</p>
+<ul>
+  <li><b>The server listens on every interface</b> (<code>host = 0.0.0.0</code>) so phones can reach it. Over plain HTTP, tokens and images cross the Wi-Fi in clear. Behind <code>tailscale serve</code> they travel over HTTPS inside Tailscale's encrypted tunnel, and with <code>host = "127.0.0.1"</code> the plain port is not on the Wi-Fi at all. With <code>ssl_certfile</code>, the Angler encrypts them itself, and its plain-HTTP listener for the PC app (<code>local_port</code>) is bound to 127.0.0.1 only.</li>
+  <li><b>Wrong codes are limited.</b> After 5 wrong codes in a row, the code changes and pairing pauses for a minute (a 429), with a line in the log and the journal. Since the code changes after every 5 guesses, finding it by guessing would take about 200,000 pauses, over four months, on average. The code is shown only to the owner.</li>
+  <li><b>Tokens don't expire, but they can be revoked.</b> Settings lists every paired device with a "remove" button (<code>DELETE /api/devices/{id}</code>). The id is made from the device's token (<code>db._public_id</code>), not its database row, so it is never another device's: a "remove" sent again after a new device paired is a 404, not that device's end. "Unpair" on a phone deletes its own token on the Angler (<code>POST /api/unpair</code>) before forgetting it.</li>
+  <li><b>A phone can read and vote, but not steer.</b> It cannot create residents, change settings or start a shift. A PC app paired as the owner can do everything this machine can, so give the code only to machines you trust.</li>
+  <li><b>Only this machine can stop the Angler.</b> <code>POST /api/shutdown</code> (<code>baitbook stop</code>) checks <code>is_local()</code> itself, so a phone or a PC app paired as the owner gets a 403.</li>
+  <li><b>A web page elsewhere is not this machine.</b> Any page open in a browser here, even one served from another port on this machine, can make the browser send the Angler a form or a simple <code>fetch</code>: CORS only stops it reading the answer. So <code>is_local()</code> also asks <code>same_origin()</code>: a request with <code>Sec-Fetch-Site</code> other than <code>same-origin</code> or <code>none</code>, or with an <code>Origin</code> that doesn't name the very <code>Host</code> it was sent to, gets no owner's rights (and, with no token, a 401). The PC app's own page passes; <code>baitbook stop</code> and <code>status</code> send neither header.</li>
+  <li><b>Bodies have a limit, and the upload is the owner's before it is read.</b> FastAPI reads a request's body, spooling a form's files to disk, before the route runs. The <code>BodyLimit</code> middleware runs first: it turns away a <code>POST /api/residents</code> from anyone but the owner without reading it, and stops any body past <code>MAX_UPLOAD</code> (256 MB, the seed images) or <code>MAX_BODY</code> (8 MB, everything else) with a 413, by its <code>Content-Length</code> or as the bytes come in.</li>
+</ul>
+<div class="callout info"><b>A proxy on this machine is not this machine.</b> A reverse proxy running beside the Angler, such as <code>tailscale serve</code> (the recommended HTTPS setup, which <code>baitbook phone</code> makes: README, "Put it on your phone"), connects from 127.0.0.1 too. <code>is_local()</code> therefore also requires a loopback <code>Host</code> header and no proxy headers, so devices behind the proxy must pair like any other. Serve gives itself away in three ways. It passes on the phone's <code>Host</code> (the PC's <code>ts.net</code> name). It sets <code>X-Forwarded-Host</code>, <code>X-Forwarded-Proto</code> and <code>X-Forwarded-For</code>. And for a person's device (not a tagged one) it adds <code>Tailscale-User-Login</code>, <code>-Name</code> and <code>-Profile-Pic</code>. Uvicorn also replaces the peer address with the one in <code>X-Forwarded-For</code> when the proxy is on 127.0.0.1. One gap is left: a proxy on this machine that sends <code>Host: 127.0.0.1</code> and adds no forwarding header at all would still look local.</div>
+
+<!-- ============================================================ 17 -->
+<h2 id="pcapp">17. The PC app</h2>
+<p>The PC app is the owner's console and a second feed. It is a web app in <code>web/app/</code>, served by the Angler at <code>/app/</code>, and <code>pcapp/</code> opens it in a native window with pywebview. The <code>baitbook</code> command runs <code>pcapp</code>, and so does <code>baitbook-app</code>, with no console, which is what the app icons open (<code>baitbook shortcut</code> adds one to the Start menu, Applications or the app menu). A browser at <code>http://127.0.0.1:8787/app/</code> gets exactly the same app.</p>
+<figure><svg id="d-pcapp"></svg>
+<figcaption>How the window comes up (left) and how the page is built (right). The Angler that <code>pcapp</code> starts is detached, so it keeps running after the window closes and the scheduled shift still happens; <code>baitbook stop</code> ends it. While its code is <code>stale</code>, the app shows a <b>restart the Angler</b> pill beside the engine's, and <code>baitbook status</code> says so too.</figcaption></figure>
+<script>
+D('d-pcapp', { w: 1000, h: 420,
+  groups: [
+    { x: 10, y: 10, w: 310, h: 400, t: 'pcapp/__main__.py · main()' },
+    { x: 360, y: 10, w: 620, h: 290, t: 'web/app/ (served at /app/)' },
+  ],
+  nodes: [
+    { id: 'toml', x: 50, y: 42, w: 250, h: 56, t: 'read baitbook.toml', s: '[app] angler_url · [server] port,\nssl_certfile, local_port', k: 'config' },
+    { id: 'reach', x: 50, y: 132, w: 250, h: 60, t: 'reachable(url)?', s: 'GET /api/status → 200 or 401\n(empty angler_url = http on 127.0.0.1)', k: 'pc' },
+    { id: 'spawn', x: 50, y: 226, w: 250, h: 70, t: 'Popen(python -m angler)', s: 'detached: no console, own session\nlog → data/angler.log (rotated at 5 MB)\nwaits up to 60 s, less if it quits', k: 'pc' },
+    { id: 'win', x: 50, y: 334, w: 250, h: 56, t: 'show(): webview.create_window', s: 'url + "/app/" · 1440 × 920 · the icon\nstorage in data/webview · or the browser', k: 'pc' },
+    { id: 'core', x: 380, y: 46, w: 230, h: 140, t: 'core.js · BB.app', s: 'routing: TABS + location.hash\n→ BB.views[app.view]\npoll(): GET /api/status\n1.5 s busy · 8 s idle\nre-render when a job ends\nshared: postCard · vote · avatar', k: 'pc' },
+    { id: 'views', x: 660, y: 46, w: 300, h: 130, t: 'views-*.js → BB.views', s: 'feed · residents · shift · memory\nledger · reef · settings\n\neach may have: render · after\nonClick · onInput · onChange\nonSubmit · onStatus · onVote', k: 'pc' },
+    { id: 'shared', x: 380, y: 222, w: 230, h: 66, t: 'web/shared/', s: 'api.js (BB.api) · reef.js (BB.reef)\ntheme.css', k: 'shared' },
+    { id: 'angler', x: 660, y: 334, w: 300, h: 56, t: 'the Angler: /api/ and /media/', s: 'same machine: no token needed\nanother machine: the owner’s token', k: 'api' },
+  ],
+  edges: [
+    { f: 'toml', t: 'reach' },
+    { f: 'reach', t: 'spawn', l: 'no' },
+    { f: 'reach:l', t: 'win:l', via: [[30, 162], [30, 362]], l: 'yes', lo: [0, 40] },
+    { f: 'spawn', t: 'win', l: 'or a page with the log’s path', lo: [0, -2] },
+    { f: 'win:r', t: 'core:l.75', via: [[340, 362], [340, 143]], l: 'opens' },
+    { f: 'core:r', t: 'views:l', two: true },
+    { f: 'core:b', t: 'shared:t', l: 'BB.api', lo: [30, 0] },
+    { f: 'shared:b.5', t: 'angler:l', via: [[495, 362]], l: 'fetch()' },
+  ] });
+</script>
+<table>
+  <tr><th>Tab</th><th>File</th><th>What it shows</th><th>Calls</th></tr>
+  <tr><td>Feed</td><td><code>views-feed.js</code></td><td>The last 7 days, grouped by night, with a side card on the Angler (residents, edits, bite rate, snag rate). "prompt" opens the post's prompt and edit chain. Votes go straight home; "✕ snag" takes a broken render out at once, with undo in the toast.</td><td><code>GET /api/posts?days=7</code>, <code>GET /api/posts/{id}</code>, <code>POST /api/votes</code>, <code>POST /api/posts/{id}/snag</code></td></tr>
+  <tr><td>Residents</td><td><code>views-residents.js</code></td><td>Each resident's seeds and mood tags. A new resident: pick 5 images, then watch the vision read fill in each prompt live. Edit counts with bite and snag rates. Edit name, handle, bio and tags, re-read, delete; "Read again" after a failed read.</td><td><code>POST</code> / <code>PATCH</code> / <code>DELETE /api/residents</code>, <code>POST …/{id}/read</code></td></tr>
+  <tr><td>Night shift</td><td><code>views-shift.js</code></td><td>Run one now, the variation, the live pipeline (one row per edit, from <code>status.items</code>, with what it is changing), the schedule switch, time and catch-up window, how many bites and throw-backs go in as examples, history (done, failed, interrupted, with each night's snags) and the journal.</td><td><code>POST /api/shift</code>, <code>GET /api/shifts</code>, <code>GET /api/journal</code>, <code>GET</code> / <code>PUT /api/config</code></td></tr>
+  <tr><td>Memory</td><td><code>views-memory.js</code></td><td>One resident's context, exactly as a shift would send it now, with the sampled bites and throw-backs marked.</td><td><code>GET /api/residents/{id}/memory</code></td></tr>
+  <tr><td>Ledger</td><td><code>views-memory.js</code></td><td>Every prompt written or read, newest first, with its verdict; filter by resident and kind. The "snagged" filter lists snags, with undo while their images remain.</td><td><code>GET /api/posts</code></td></tr>
+  <tr><td>Reef</td><td><code>views-reef.js</code></td><td>The edit graph (<a href="#reef">section 20</a>) with a night slider, "Grow it" replay, and a card for the picked image.</td><td><code>GET /api/residents/{id}/graph</code></td></tr>
+  <tr><td>Settings</td><td><code>views-settings.js</code></td><td>Drop-in models, image size and steps, the phone's window, the pairing code, the LAN addresses, the paired devices with their role and a "remove" button, and, on this machine, where the config and data are.</td><td><code>GET</code> / <code>PUT /api/config</code>, <code>GET /api/status</code>, <code>DELETE /api/devices/{id}</code></td></tr>
+</table>
+<ul>
+  <li><b>No build step and no framework.</b> Plain script tags in a fixed order (<code>api.js</code>, <code>reef.js</code>, <code>core.js</code>, then the views), all hanging off one global, <code>window.BB</code>. A view is an object with <code>render(params)</code> returning HTML; <code>core.js</code> sends clicks (by <code>data-act</code>) and form events to the view on screen.</li>
+  <li><b>Status drives the live parts.</b> Each poll passes the snapshot to the view's <code>onStatus</code>, which is how the Residents and Night shift tabs animate a running job without reloading. When a job ends, <code>core.js</code> reloads the residents and redraws.</li>
+  <li><b>The window, or the browser.</b> <code>show()</code> opens the app in a pywebview window with baitbook's icon (<code>baitbook/icons/</code>). If the Angler didn't start, the window shows a page with the path of <code>data/angler.log</code> instead. With no native window to be had (Linux without GTK or Qt, say), it opens the app in the browser.</li>
+</ul>
+<div class="callout info"><b>A PC app on another machine pairs as the owner.</b> With <code>[app] angler_url</code> set, the window opens that Angler's <code>/app/</code>. It is not local there, so the first poll gets a 401 and <code>core.js</code> shows a pairing screen asking for the code (shown on the Angler's machine) and a name. <code>pair()</code> sends <code>role: "owner"</code>, keeps the token in <code>localStorage</code> and reloads; from then on the app can do everything. <code>pcapp</code> runs the window with <code>private_mode = False</code> and its storage in <code>data/webview</code>, so the token survives a restart. If the device is removed in Settings, the next poll brings the pairing screen back. A browser on another machine opening <code>/app/</code> gets the same screen.</div>
+<div class="callout info"><b>The PC app on this machine skips HTTPS.</b> With <code>[app] angler_url</code> empty, <code>pcapp</code> opens <code>http://127.0.0.1:</code> plus <code>config.local_port()</code>. That is <code>[server] port</code>, or with HTTPS on, the Angler's loopback-only <code>local_port</code> (<a href="#boot">section 4</a>). No certificate has to name 127.0.0.1: Tailscale's never do, and mkcert's only if asked. Loopback HTTP is already a secure context to the browser, and the Angler sees this machine there, the owner. pywebview's <code>IGNORE_SSL_ERRORS</code> would also open an HTTPS loopback URL, but it accepts every bad certificate the window meets, for any host, so it stays off. <code>reachable()</code> counts a 401 as up (<code>urlopen</code> raises it as an <code>HTTPError</code>). While waiting for the Angler it started, <code>pcapp</code> gives up early if that Angler quits, and shows the log's path; <code>data/angler.log</code> says why, usually that another Angler holds the data folder.</div>
+
+<!-- ============================================================ 18 -->
+<h2 id="device">18. The phone app</h2>
+<p>The phone app in <code>web/device/</code> is an offline feed. It never asks the Angler for anything while you scroll: everything it shows was brought down at the last dock and lives on the phone. It is a PWA, so it can be added to the home screen: a manifest with an <code>id</code> (<code>/device/</code>), PNG icons (192, 512 and a maskable 512, besides <code>icon.svg</code>), an <code>apple-touch-icon.png</code> for iOS, which ignores SVG, and a service worker. The service worker serves the app's own files from its cache first, so a launch never waits on the network. The Angler serves <code>sw.js</code> with a hash of <code>web/device/</code> and <code>web/shared/</code> in it, so a phone picks up a new release the next time it opens the app at home.</p>
+<figure><svg id="d-device"></svg>
+<figcaption>What the phone keeps, and where. Only <code>sync()</code> (the Dock button) and pairing touch the network. Everything else reads <code>BB.store</code>, which <code>S.load()</code> fills from IndexedDB at start.</figcaption></figure>
+<script>
+D('d-device', { w: 1000, h: 400,
+  groups: [{ x: 10, y: 10, w: 640, h: 380, t: 'on the phone' }],
+  nodes: [
+    { id: 'ui', x: 30, y: 44, w: 270, h: 120, t: 'device.js', s: 'render(): pair · feed · residents\nprofile (grid or compact reef)\none post · dock\nonClick → S.vote(), sync()\nwhole-screen innerHTML, keeps scroll', k: 'device' },
+    { id: 'store', x: 360, y: 44, w: 270, h: 120, t: 'device-store.js · BB.store', s: 'S.posts · S.residents · S.meta\nS.vote(): offline, queued = true\nS.dock(progress)\nS.img(stem): a blob object URL\nS.chain(p)', k: 'device' },
+    { id: 'idb', x: 360, y: 210, w: 270, h: 110, t: 'IndexedDB baitbook-device', s: 'posts (by id, with queued, vote)\nresidents\nblobs: "stem", "stem_t" → JPEG\nmeta: lastDock · history (8)', k: 'store', shape: 'cyl' },
+    { id: 'ls', x: 30, y: 210, w: 270, h: 56, t: 'localStorage baitbook.angler', s: '{ base, token, name } (api.js)', k: 'trust' },
+    { id: 'sw', x: 30, y: 296, w: 270, h: 76, t: 'sw.js · baitbook-shell-{hash}', s: 'the app shell: cache first,\nversioned by a hash of the shell\nskips /api/ and /media/', k: 'device' },
+    { id: 'angler', x: 720, y: 60, w: 260, h: 88, t: 'the Angler', s: 'POST /api/pair (once)\nPOST /api/dock\nGET /media/stem.jpg, stem_t.jpg', k: 'api' },
+    { id: 'files', x: 720, y: 300, w: 260, h: 88, t: '/device/ and /shared/', s: 'index.html · device.css · manifest\nicons (PNG + SVG) · api.js · reef.js\ntheme.css · fonts/ (self-hosted, OFL)', k: 'shared' },
+  ],
+  edges: [
+    { f: 'ui:r', t: 'store:l', two: true },
+    { f: 'store:b', t: 'idb:t', two: true },
+    { f: 'ui:b.25', t: 'ls:t.25', two: true, l: 'api.paired()', lo: [0, -2] },
+    { f: 'store:r', t: 'angler:l.4', l: 'only when docking', lo: [0, -12] },
+    { f: 'sw:r', t: 'files:l', l: 'cached copies', lo: [0, 14] },
+  ] });
+</script>
+<ul>
+  <li><b>Images are blobs, not URLs.</b> At the dock the phone downloads both JPEGs of each new post (<code>&lt;stem&gt;.jpg</code> for the feed, <code>&lt;stem&gt;_t.jpg</code> for grids and the reef) and stores them in IndexedDB. At start, <code>warmImages()</code> turns every stored blob into an object URL. Nothing is fetched while scrolling.</li>
+  <li><b>Votes wait on the phone.</b> <code>S.vote</code> toggles the post's vote, marks it <code>queued</code> (and <code>voteQueued</code>), and records the time. The header pill and the Dock tab badge count what is queued. A double-tap on an image is a bite.</li>
+  <li><b>So do snags.</b> "✕ snag" (<code>S.snag</code>) marks the post <code>snagged</code> and <code>queued</code>, and every screen reads <code>S.visible()</code>, so it is gone at once. The toast offers undo; the next dock sends the snag home and drops the post. A dock marks every snag it takes out <code>snagSent</code>, so undoing one while that dock is out (or after it failed) keeps the post queued, and the next dock sends <code>unsnag</code> instead. Once a dock has come back the post is gone, and the toast points to the PC app's Ledger.</li>
+  <li><b>The feed ends.</b> Posts are grouped by night, newest night first, with the seed images last. After that comes an end card: "That's the whole catch." There is no paging and no infinite scroll.</li>
+  <li><b>On the Angler's own machine there is no pairing.</b> At <code>localhost</code> the page is local (<code>LOCAL</code> in <code>device.js</code>), so it skips the pair screen and docks without a token. That is how it was tested on the PC.</li>
+  <li><b>Unpairing is real.</b> "unpair" on the Dock screen sends <code>POST /api/unpair</code>, so the token stops working on the Angler, then forgets it. The posts stay on the phone.</li>
+  <li><b>One browser, one token per Angler.</b> The token lives in <code>localStorage</code> under <code>baitbook.angler</code>, which <code>/app/</code> and <code>/device/</code> on the same address share. A browser that paired the PC app as the owner opens the phone app already paired, as the owner.</li>
+</ul>
+<div class="callout"><b>Offline needs HTTPS.</b> Browsers only run a service worker in a secure context: <code>https://</code>, or <code>localhost</code>. Over plain <code>http://192.168.x.x:8787</code> the phone still keeps its posts, images and votes in IndexedDB. But the page itself is not cached, so it cannot open with no network. <code>device.js</code> registers <code>sw.js</code> only when <code>window.isSecureContext</code> is true. To get the full offline app on a phone, put the Angler behind <code>tailscale serve</code> (recommended; <code>baitbook phone</code> does it), or set <code>ssl_certfile</code> / <code>ssl_keyfile</code> in <code>[server]</code> (README, "Put it on your phone"). Give the phone an address that won't change, too. The installed app, its cache and its token belong to the origin it was installed from, so a new LAN IP strands it. A MagicDNS name doesn't change.</div>
+
+<!-- ============================================================ 19 -->
+<h2 id="dock">19. Docking, end to end</h2>
+<p>A dock is one request. The phone sends the votes it has been holding and the ids of every post it has. The Angler answers with what the phone is missing, what it should let go of, and the current vote on everything it keeps. <code>S.dock</code> in <code>device-store.js</code> on one side and <code>dock()</code> in <code>server.py</code> on the other.</p>
+<figure><svg id="d-dock"></svg>
+<figcaption>One dock. The four steps on the phone's Dock screen ("Looking for the Angler", "Sending votes home", "Pulling down the catch", "Tidying up") are the <code>progress(step)</code> calls. Purple arrows are writes.</figcaption></figure>
+<script>
+S('d-dock', { w: 1000, row: 33,
+  actors: [{ id: 'ui', t: 'device.js\nsync()', k: 'device' }, { id: 'ds', t: 'device-store.js\nS.dock()', k: 'device' }, { id: 'idb', t: 'IndexedDB', k: 'store' },
+           { id: 'api', t: 'server.py\ndock()', k: 'api' }, { id: 'db', t: 'db.py', k: 'store' }, { id: 'med', t: '/media/', k: 'api' }],
+  steps: [
+    { f: 'ui', t: 'ds', l: 'Dock & sync' },
+    { f: 'ds', t: 'api', l: 'POST /api/dock\nvotes: the queued posts {id, vote?, voted_at,\nsnag?, unsnag?, snagged_at} · have: every post id' },
+    { f: 'api', t: 'api', l: 'client(): the device’s name' },
+    { f: 'api', t: 'db', l: 'vote(id, v, device name, at) for each vote (skipped\nif a newer one is stored) · snag(id, at) for each snag', c: '#7a4fb5' },
+    { f: 'api', t: 'db', l: 'keep = seeds + posts of the last\nkeep_nights × 24 h, vote ≥ 0, not snagged' },
+    { note: 'new = keep − have · drop = have − keep · votes = the vote of each kept post it has', over: ['idb', 'med'] },
+    { f: 'api', t: 'db', l: 'record_dock(up, down) · event(dock)', c: '#7a4fb5' },
+    { f: 'api', t: 'ds', l: '{residents, posts: new, drop, votes, keep_nights, now}', d: true },
+    { note: 'for each new post, and each kept post still missing an image: the full JPEG, then the thumbnail', over: ['ds', 'med'] },
+    { f: 'ds', t: 'med', l: 'GET /media/stem.jpg?t= · stem_t.jpg?t=' },
+    { f: 'med', t: 'ds', l: 'a blob', d: true },
+    { f: 'ds', t: 'idb', l: 'blobs.put(blob, key)', c: '#7a4fb5' },
+    { gap: 6 },
+    { f: 'ds', t: 'idb', l: 'posts: put new · take the Angler’s votes, clear queued · delete dropped', c: '#7a4fb5' },
+    { f: 'ds', t: 'idb', l: 'drop their blobs · replace residents · meta.lastDock, history', c: '#7a4fb5' },
+    { f: 'ds', t: 'ui', l: '{up, down, dropped} → reload, back to the feed, a toast', d: true },
+  ] });
+</script>
+<ul>
+  <li><b>A snag leaves the phone at the dock that sends it.</b> The snag goes home first, then the post is no longer in <code>keep</code>, so it comes back in <code>drop</code>. The journal's dock line counts snags apart from votes.</li>
+  <li><b>A throw-back leaves the phone at the next dock.</b> Its vote goes home first, then it is no longer in <code>keep</code>, so it comes back in <code>drop</code>. The same happens to a post the owner throws back on the PC, and to anything older than <code>keep_nights</code>. Seeds are never dropped.</li>
+  <li><b>"7 nights" is 7 × 24 hours</b> back from the moment of the dock, by each post's <code>created_at</code>. It is not counted in shifts.</li>
+  <li><b>Retrying is safe.</b> Votes are values, so if the connection fails after the Angler has stored them, the phone still has them queued and sends them again next time, with the same result.</li>
+  <li><b>Votes travel both ways.</b> The answer's <code>votes</code> carries the current vote of every kept post the phone has, and the phone takes it. A bite given on the PC shows on the phone after its next dock. A throw-back given on the PC reaches it as a drop.</li>
+  <li><b>The newer vote wins, not the later request.</b> Each vote carries the time it was made (<code>at</code>, the phone's clock). <code>db.vote</code> skips one older than the vote already stored, so a phone that docks today with a vote from yesterday does not undo what the owner decided this morning. The phone then shows the owner's vote.</li>
+  <li><b>A missing image is fetched again.</b> If a download fails, the post is stored without it. Every dock looks for kept posts that have no image on the phone and fetches it.</li>
+</ul>
+
+<!-- ============================================================ 20 -->
+<h2 id="reef">20. The Reef</h2>
+<p>The Reef draws one resident's edit graph as coral. It is one renderer, <code>BB.reef</code> in <code>web/shared/reef.js</code>, used by both apps. The PC app draws it full size in the Reef tab from <code>GET /api/residents/{id}/graph</code>. The phone draws it compact on a resident's profile, from the posts it has on hand. It is HTML, not canvas: an SVG for the branches and the seabed, and one <code>&lt;button&gt;</code> per image, so every node can be clicked.</p>
+<figure><svg id="d-reef"></svg>
+<figcaption>A worked example of <code>R.layout()</code>: three seeds, three edits on night 1 and two on night 2. The layout is a tidy tree laid on its side, with time going up. Colours here stand for the node kinds: brown seed, green bitten, white not voted, grey thrown back.</figcaption></figure>
+<script>
+D('d-reef', { w: 1000, h: 320,
+  groups: [
+    { x: 10, y: 20, w: 730, h: 80, t: 'night #2' },
+    { x: 10, y: 125, w: 730, h: 80, t: 'night #1' },
+    { x: 10, y: 230, w: 730, h: 80, t: 'seeds' },
+  ],
+  nodes: [
+    { id: 'e10', x: 112, y: 38, w: 76, h: 46, t: '#10', s: 'slot 0', k: 'device' },
+    { id: 'e11', x: 222, y: 38, w: 76, h: 46, t: '#11', s: 'slot 1', k: 'plain' },
+    { id: 'e6', x: 167, y: 143, w: 76, h: 46, t: '#6', s: 'slot 0.5', k: 'device' },
+    { id: 'e7', x: 332, y: 143, w: 76, h: 46, t: '#7', s: 'slot 2', k: 'plain' },
+    { id: 'e8', x: 651, y: 143, w: 76, h: 46, t: '#8', s: 'slot 4.9', k: 'ext' },
+    { id: 's1', x: 249, y: 248, w: 76, h: 46, t: '#1', s: 'slot 1.25', k: 'image' },
+    { id: 's2', x: 491, y: 248, w: 76, h: 46, t: '#2', s: 'slot 3.45', k: 'image' },
+    { id: 's3', x: 651, y: 248, w: 76, h: 46, t: '#3', s: 'slot 4.9', k: 'image' },
+    { id: 'rules', x: 760, y: 20, w: 225, h: 290, t: 'R.layout(nodes, opts)', s: 'one row per night with posts,\nseeds at the bottom\n\nplace() lays out children first:\na leaf takes the next slot,\na parent sits halfway between\nits first and last child\n\nroots in id order, with\n0.45 of a slot between trees\n\nx = pad + slot × col\ny from the row, top row first\n\nan edit whose source isn’t\nin view becomes a root', k: 'note', shape: 'note' },
+  ],
+  edges: [
+    { f: 's1:t', t: 'e6:b' }, { f: 's1:t', t: 'e7:b' }, { f: 's3:t', t: 'e8:b' },
+    { f: 'e6:t', t: 'e10:b' }, { f: 'e6:t', t: 'e11:b' },
+  ] });
+</script>
+<table>
+  <tr><th>Drawn as</th><th>Means</th><th>From</th></tr>
+  <tr><td>a node on the seabed row</td><td>a seed image</td><td><code>kind = 'seed'</code></td></tr>
+  <tr><td>a node in a higher row</td><td>an edit made on that night</td><td><code>shift_id</code>; rows are only the nights this resident has posts in, so there are no empty rows</td></tr>
+  <tr><td>a branch</td><td>"was edited from"</td><td><code>source_id</code>; a cubic curve from the source up to the edit</td></tr>
+  <tr><td>branch colour</td><td>the edit's own image</td><td><code>media.avg_color</code> of its thumbnail, mixed 15% toward brown</td></tr>
+  <tr><td>branch thickness</td><td>how much grew from here</td><td>grows with the square root of the edit's descendants, up to 11 px (6 px compact)</td></tr>
+  <tr><td>bubbles</td><td>a bite</td><td><code>vote &gt; 0</code> (full size only)</td></tr>
+  <tr><td>a pale node and branch</td><td>a throw-back: a dead end, since it is never a source again</td><td><code>vote &lt; 0</code></td></tr>
+</table>
+<ul>
+  <li><b>Picking an image lights its lineage.</b> <code>lineage()</code> collects everything it descends from and everything that grew from it, and every other node dims. In the PC app, a card shows the picked image's verdict, how many edits it is from its seed, how much grew from it, its source and its prompt. "see it in the reef" on a post opens the Reef with that post picked.</li>
+  <li><b>"Grow it" replays the nights.</b> The PC app's slider sets <code>upTo</code>, the last row drawn. Play steps it from the seeds up, one night every 1.3 s, and the row that just appeared gets the <code>grow</code> class so its branches draw in.</li>
+  <li><b>Snags are not drawn.</b> <code>GET /api/residents/{id}/graph</code> leaves them out, so an edit made from a post that was later snagged starts a branch of its own, floating at its night's row.</li>
+  <li><b>The phone's reef is partial.</b> It holds only the seeds and the last <code>keep_nights</code> of posts. When the middle of a chain has aged out, the rest of it starts as a new root, floating, instead of growing from its seed.</li>
+</ul>
+
+<!-- ============================================================ 21 -->
+<h2 id="schedule">21. The schedule</h2>
+<p>A night shift can be run by hand from the Night shift tab, or on a schedule. The schedule is a switch, a time and a catch-up window: <code>[shift] schedule_enabled</code>, <code>schedule_time</code> and <code>catch_up_hours</code>, set on the same tab. <code>Engine._scheduler</code>, a daemon thread started with the engine, asks <code>Engine.due()</code> every 20 seconds whether a shift is owed.</p>
+<figure><svg id="d-sched"></svg>
+<figcaption>One tick of <code>_scheduler()</code>; every arrow is a "yes", and any "no" waits for the next tick. It reads the config on every tick, so flipping the switch or changing the time or window takes effect within 20 s, with no restart. "Owed" is decided from the <code>shifts</code> table, so it survives a restart.</figcaption></figure>
+<script>
+D('d-sched', { w: 1000, h: 210,
+  nodes: [
+    { id: 'tick', x: 20, y: 40, w: 130, h: 80, t: 'sleep(20)', s: 'then\nconfig.section\n("shift")', k: 'engine' },
+    { id: 'en', x: 175, y: 40, w: 130, h: 80, t: 'switch on?', s: 'schedule_enabled', k: 'config' },
+    { id: 'last', x: 330, y: 40, w: 150, h: 80, t: 'the last slot', s: 'schedule_time today,\nor yesterday’s if\ntoday’s is still to come', k: 'config' },
+    { id: 'win', x: 505, y: 40, w: 140, h: 80, t: 'within the window?', s: 'catch_up_hours\n(a minute if 0)', k: 'config' },
+    { id: 'day', x: 670, y: 40, w: 140, h: 80, t: 'no shift since?', s: 'db.shift_since(slot)\nmanual ones count', k: 'store' },
+    { id: 'sub', x: 835, y: 40, w: 150, h: 80, t: 'submit("shift")', s: 'trigger = "schedule"\na journal line if it\nruns late', k: 'engine' },
+    { id: 'note', x: 175, y: 155, w: 810, h: 40, t: 'GET /api/status → next_run: schedule_time when the switch is on · keep_awake() holds off idle sleep while the job runs', k: 'note', shape: 'note' },
+  ],
+  edges: [
+    { f: 'tick', t: 'en' }, { f: 'en', t: 'last' }, { f: 'last', t: 'win' }, { f: 'win', t: 'day' }, { f: 'day', t: 'sub' },
+  ] });
+</script>
+<ul>
+  <li><b>Catching up.</b> This PC is a laptop. On battery it sleeps after 45 minutes idle, and closing the lid sleeps it at any time; a sleeping machine runs nothing, and nothing here wakes it. When it wakes, or the Angler starts, within <code>catch_up_hours</code> (6 by default) of the scheduled time, the shift runs then, with a journal line saying how late. Past the window, that night is skipped. A shift already run since the scheduled time, scheduled or by hand, counts, so a restart never runs a night twice. Set the window to 0 to only ever run on time.</li>
+  <li><b>Awake while working.</b> While any job runs, <code>keep_awake()</code> stops the machine idling into sleep halfway through a shift: <code>SetThreadExecutionState</code> on Windows, <code>caffeinate</code> on macOS, and <code>systemd-inhibit</code> on Linux where there is one. It does not stop the lid.</li>
+  <li><b>Closing the PC app does not stop it.</b> The Angler that <code>pcapp</code> starts runs detached (<a href="#pcapp">section 17</a>); <code>baitbook stop</code> ends it. Closing the console of a <code>baitbook angler</code> does stop it.</li>
+  <li><b>A shift takes minutes.</b> Each post is about 25 s of prompt and caption plus 30 to 100 s of image edit (klein 9B, measured in development). With 3 posts for each of 6 residents, that is roughly 25 to 40 minutes after 03:00.</li>
+</ul>
+
+<!-- ============================================================ 22 -->
+<h2 id="tests">22. Tests</h2>
+<p>There are about 400 automated tests in <code>tests/</code>, run with <code>uv run pytest</code>. None needs a model, a GPU, ComfyUI or the network. <code>tests/conftest.py</code> sets the ground rules:</p>
+<ul>
+  <li><b>Never the owner's data.</b> <code>BAITBOOK_HOME</code>, <code>BAITBOOK_CONFIG</code> and <code>BAITBOOK_DATA</code> point at a throwaway folder before anything imports <code>angler</code>, and every test gets an empty home of its own (the autouse <code>home</code> fixture). App icons go to a temporary folder too (<code>BAITBOOK_SHORTCUT_DIR</code>).</li>
+  <li><b>Never a running Angler or ComfyUI.</b> The suite refuses to connect to ports 8787, 8788 and 8188. ComfyUI is never started, the scheduler never ticks, and <code>keep_awake()</code> does nothing.</li>
+  <li><b>Fake models.</b> <code>tests/support.py</code> has a fake language model and a fake <code>ComfyClient</code> (<code>FakeLM</code>, <code>FakeComfy</code>), tiny images made in memory, and helpers that add residents and posts.</li>
+</ul>
+<table>
+  <tr><th>File</th><th>What it covers</th></tr>
+  <tr><td><code>test_prompts.py</code></td><td>Every text the language model is given: the read and shift prompts with and without bad examples, the directions, <code>similarity()</code>, <code>clean_reply</code>, <code>parse_tags</code>, a primer file.</td></tr>
+  <tr><td><code>test_db.py</code></td><td>Votes (the newer one wins), snags and their purge, chains, shifts, devices, docks, residents, and an old database migrated.</td></tr>
+  <tr><td><code>test_config.py</code></td><td>The first run, type-checked updates (all or nothing; <code>LOCAL_ONLY</code> keys), comment-keeping writes, missing keys and sections, <code>path()</code>, <code>local_port()</code>, a byte order mark.</td></tr>
+  <tr><td><code>test_media.py</code></td><td>The PNG master and its JPEG variants; <code>media.path</code> refusing anything outside <code>images/</code>.</td></tr>
+  <tr><td><code>test_imagegen.py</code></td><td>The graph <code>build()</code> makes (safetensors, GGUF and mixed loaders, tiled or plain decode), and edits against a fake ComfyUI server.</td></tr>
+  <tr><td><code>test_engine.py</code></td><td>With the fake models: jobs and the queue, <code>_recover()</code>, <code>due()</code>, <code>context()</code>, <code>write_edit()</code>'s second ask, and whole night shifts.</td></tr>
+  <tr><td><code>test_server.py</code></td><td>The API through FastAPI's <code>TestClient</code>: who is local, tokens and roles, pairing and its limit, residents, posts, votes, snags, the dock, <code>/api/shutdown</code>, <code>sw.js</code> and the web files.</td></tr>
+  <tr><td><code>test_cli.py</code></td><td>The <code>baitbook</code> command, <code>baitbook setup</code>, <code>baitbook shortcut</code> and <code>baitbook phone</code> (against a pretend Tailscale), with no Angler running.</td></tr>
+  <tr><td><code>test_tailscale.py</code></td><td>Reading <code>tailscale status</code> and <code>tailscale serve status</code> from a pretend <code>tailscale</code> command: which Serve configs pass the root on to this Angler, and Tailscale missing, failing or not answering. The suite never asks the owner's real Tailscale.</td></tr>
+  <tr><td><code>test_comfyui.py</code></td><td>GPU detection, the PyTorch build per GPU, <code>baitbook comfyui</code> with the network and uv faked (and refusing while an Angler answers), the port it picks, ComfyUI started with its <code>--base-directory</code>, and that someone else's ComfyUI on the port is never used.</td></tr>
+  <tr><td><code>test_models.py</code></td><td><code>baitbook models</code> against a fake Hugging Face on a loopback port: what counts as missing, the user's own choice left alone, resuming, a dropped connection, a server that can't resume, a bad sha256, no room on the disk, Ctrl+C, the progress line.</td></tr>
+  <tr><td><code>test_smoke.py</code></td><td>A real Angler process on a free loopback port, with a throwaway home: it serves the API and both apps, refuses to run twice on the same data or on a taken port, answers <code>baitbook status</code> and stops on <code>baitbook stop</code>.</td></tr>
+</table>
+<p><b>CI</b> (<code>.github/workflows/ci.yml</code>) runs the tests on Linux, Windows and macOS, without llama-cpp-python. Then it builds the wheel, installs it in a fresh venv and runs <code>tests/check_wheel.py</code>: the wheel must carry the web files, the fonts, the example config and the workflow, and the installed package must find them, start an Angler with <code>baitbook angler</code>, answer <code>baitbook status</code> and stop on <code>baitbook stop</code>. macOS and Linux are covered by these tests, but haven't been run with the models yet.</p>
+<ul>
+  <li><b>Checked by hand</b> on Windows with an AMD GPU (HIP), on the first build:
+    <ul>
+      <li>a vision read of 5 images (about 3 minutes);</li>
+      <li>two full night shifts, 3 of 3 edits each, with ComfyUI started and stopped by the Angler;</li>
+      <li>edits of edits;</li>
+      <li>every PC app tab;</li>
+      <li>pairing and docking a phone over the LAN, with images stored on the phone;</li>
+      <li>an offline vote synced on the next dock;</li>
+      <li>the pywebview window;</li>
+      <li>a cold start from an empty <code>data/</code>.</li>
+    </ul></li>
+  <li><b>Checked on the second round</b> (the fixes and the variation work), against a second Angler on port 8790 with a copy of the data (<code>BAITBOOK_DATA</code>, <code>BAITBOOK_CONFIG</code>):
+    <ul>
+      <li>30 API checks: who counts as local (with proxy headers, a foreign <code>Host</code>, from the LAN), the pairing limit and pause, device and owner roles, removing and unpairing, the dock's votes both ways and an old vote losing to a newer one, a failed read and a failed shift, a cut-off shift marked interrupted;</li>
+      <li>8 checks of <code>Engine.due()</code>: on time, before, caught up within the window, past it, a window of 0, across midnight, and a shift already run;</li>
+      <li>11 browser checks in headless Chrome: the new Night shift and Residents controls, a PC app pairing from "another machine" (the LAN address) and working as the owner, a phone docking with every image stored and receiving a bite given on the PC, and no JavaScript errors;</li>
+      <li>the edit variation measured on Gemma 4 31B with the real residents (<a href="#variation">section 9</a>), and the vision read of one resident redone with the watermark rule. Its date, corner text and @handle were gone.</li>
+    </ul></li>
+  <li><b>Checked on the third round</b> (snags, 5 good and 3 bad examples), the same way:
+    <ul>
+      <li>24 API checks: the column added to the existing database; a snag leaving the feed, the Reef, the examples and the counts, and showing in the Ledger's filter; undo with the vote intact; seeds refused; the bad-examples section gone at 0 and back at 3; a phone's snag through the dock; the next shift clearing the files but keeping the row; undo refused after that; snagged posts never picked as sources;</li>
+      <li>14 browser checks: the snag button and its undo toast in the PC feed, the Ledger's snagged filter and its undo, the example counts on the Night shift tab, and on a 390 px phone: the buttons fitting, a snag hiding the post, the Dock screen counting it, and the dock sending it home. No JavaScript errors.</li>
+    </ul></li>
+  <li><b>Checked with baitbook's own ComfyUI and the model downloads</b>, the same way:
+    <ul>
+      <li><code>baitbook comfyui</code> from nothing took about 5 minutes (1 min 42 s with the wheels cached), and PyTorch 2.13 with ROCm 10 saw the GPU;</li>
+      <li>a klein 9B GGUF edit rendered through <code>ComfyClient</code>: 59 s to start ComfyUI, and 174 s for the first edit, including loading the models;</li>
+      <li><code>baitbook models</code> in a fresh home started the 17.65 GB Gemma GGUF downloading. After a hard kill it read the 445 MB <code>.part</code> again, then carried on from there. It downloaded the 1.2 GB mmproj in full, checked its size and sha256, and pointed the config at it.</li>
+    </ul></li>
+  <li><b>To check a change cheaply,</b> run <code>uv run pytest</code>. To check it with the models, set <code>posts_per_resident</code> to 1, run a shift from the Night shift tab, and watch the pipeline. For prompt changes, the Memory tab shows each resident's system prompt for the night.</li>
+</ul>
+
+<!-- ============================================================ 23 -->
+<h2 id="logs">23. Logs and diagnostics</h2>
+<table>
+  <tr><th>Where</th><th>What is in it</th></tr>
+  <tr><td>The Angler's console (<code>baitbook angler</code>), or <code>data/angler.log</code> when <code>pcapp</code> started it</td><td>UTF-8 either way. Past 5 MB, <code>pcapp</code> moves the old log to <code>angler.log.1</code> before it starts an Angler. Python logging at INFO, from <code>angler.*</code>: the port and pairing code at start (with HTTPS on, also the PC app's loopback address), or why it didn't start (another Angler holds the data folder; the port is taken), ComfyUI starting and stopping, failed edits, and a full traceback for a failed job. Uvicorn logs at WARNING only, so there are no per-request lines. llama.cpp is quiet (<code>verbose=False</code>), and <code>Engine._chat</code> swallows the chat handler's habit of printing every prompt.</td></tr>
+  <tr><td><code>data/comfy.log</code></td><td>Everything printed by the ComfyUI the Angler starts, appended across runs. The first place to look when an edit fails.</td></tr>
+  <tr><td>The journal (the <code>events</code> table)</td><td>One line per thing the owner cares about: a resident read, a shift starting and finishing, a snag's images cleared, a dock, a new device, a failed job. Shown on the Night shift tab.</td></tr>
+  <tr><td><code>GET /api/status</code></td><td>The live picture: <code>state</code>, <code>phase</code>, <code>detail</code>, each item's <code>stage</code> and <code>error</code>, and the last job's <code>error</code>. The PC app's header pill shows "last job failed".</td></tr>
+  <tr><td>The <code>shifts</code> table</td><td>Every shift with its trigger, start, end, post count, status (done, failed, interrupted) and error; the History card, with the error on hover.</td></tr>
+  <tr><td><code>baitbook status</code></td><td>Where the config and data are; whether the Angler on this machine answers, and if so what it is doing, the counts, the pairing code and the phone addresses: the Tailscale Serve one first (it works offline), then the LAN one, marked "same Wi-Fi only" over plain HTTP. It exits with status 1 when no Angler answers.</td></tr>
+  <tr><td><code>baitbook phone</code></td><td>Whether Tailscale is installed, connected and named (and if not, what to do), what <code>tailscale serve</code> already passes on, then <code>tailscale serve --bg</code>'s own output, with any link Tailscale shows to turn HTTPS on. It never replaces another site Serve already has at the root. At the end, the phone's address, a QR code of it and the steps on the phone.</td></tr>
+  <tr><td><code>baitbook setup --check</code></td><td>What is missing, asking nothing and changing nothing: llama-cpp-python (and whether it can use the GPU), the model paths, ComfyUI and its Python, the image model files in ComfyUI's models folder (under <code>comfy_base</code> when it is set), and ComfyUI-GGUF for <code>.gguf</code> files. A missing ComfyUI, ComfyUI-GGUF or default model says which of <code>baitbook comfyui</code> and <code>baitbook models</code> would fetch it. It exits with status 1 if anything is missing.</td></tr>
+  <tr><td><code>baitbook comfyui</code>, <code>baitbook models</code></td><td>Their own progress, in the console. <code>comfyui</code>: the GPU it found, each step (<code>&gt; PyTorch for this GPU</code>) with uv's output under it, and at the end whether PyTorch sees the GPU. <code>models</code>: what is in place, what it will download and how much, then one progress line per file (GB done, MB/s, time left; a line every 10% when the output isn't a terminal). Both are safe to run again.</td></tr>
+</table>
+<table>
+  <tr><th>When this happens</th><th>What you see</th><th>What is left behind</th></tr>
+  <tr><td>One edit fails</td><td>That item says "failed" with ComfyUI's message; the rest carry on.</td><td>The shift finishes as "done" with "n of m edits".</td></tr>
+  <tr><td>A prompt comes back too close</td><td>A line in the console ("came back 92% the same; the second try is 40%"); the row shows the kept prompt.</td><td>Nothing: the further of the two replies is kept.</td></tr>
+  <tr><td>The language model won't load (4 tries)</td><td><code>LLMError</code>: "…is the GPU memory in use?" in the status ("The last shift stopped: …"), the journal and the console. Items not reached say "not made: the shift stopped".</td><td>The shift row is <code>failed</code>, with the error. A resident whose read failed is <code>failed</code>, and the card offers "Read again".</td></tr>
+  <tr><td>llama-cpp-python isn't installed</td><td><code>LLMError</code>: "llama-cpp-python is not installed in this environment", as above. <code>baitbook setup</code> says so too.</td><td>As above. Everything that doesn't need the language model works.</td></tr>
+  <tr><td>ComfyUI won't start</td><td><code>ImageGenError</code>: "exited while starting; see its log", or "did not come up in time" after 180 s.</td><td>The prompts written in phase 1 are lost with the job; the shift row is <code>failed</code>.</td></tr>
+  <tr><td>Some other ComfyUI answers at <code>comfy_url</code> (with <code>comfy_base</code> set)</td><td><code>ImageGenError</code> from <code>check_ours()</code>: "Another ComfyUI is running at …, not baitbook's own. Stop it, or move baitbook's to a free port with [image] comfy_url (`baitbook comfyui` picks one)."</td><td>As for ComfyUI not starting. <code>release()</code> never sends that ComfyUI <code>/free</code>.</td></tr>
+  <tr><td><code>baitbook comfyui</code> while the Angler runs</td><td>"The Angler is running; <code>baitbook stop</code> it first, so the ComfyUI it may have started isn't in use", and status 1.</td><td>Nothing.</td></tr>
+  <tr><td><code>baitbook comfyui</code> fails</td><td><code>InstallError</code>, and status 1: for a step, "&lt;the step&gt; failed (the output above says why). Run <code>baitbook comfyui</code> again to retry", with uv's own error above it. Others: a download that fails ("Couldn't download … Check the connection and run <code>baitbook comfyui</code> again"), uv not found, an NVIDIA driver older than CUDA 12.6, no free port from 8190 to 8299. Under <code>baitbook setup</code> it is a "ComfyUI: …" line.</td><td>The steps already done, which the next run skips; retrying is safe. The config is only written once every step has worked.</td></tr>
+  <tr><td>PyTorch doesn't see the GPU after <code>baitbook comfyui</code></td><td>"!! PyTorch doesn't see a GPU (…). ComfyUI will run on the CPU, which is very slow for klein. Set BAITBOOK_GPU and run <code>baitbook comfyui --torch</code> to try another build."</td><td>A working install that renders on the CPU. <code>--torch</code> installs PyTorch again, for the GPU <code>BAITBOOK_GPU</code> or <code>--gpu</code> names.</td></tr>
+  <tr><td>A model download fails</td><td>A <code>DownloadError</code> line for each file that failed: a 404 or other refusal at once, or "the download keeps failing (…)" after 5 retries in a row with nothing more arriving. Or, before anything starts, "not enough disk space in …". Then "n still missing", and status 1.</td><td>The other files carry on. The <code>.part</code> is kept, and the next <code>baitbook models</code> resumes it. A size or sha256 mismatch deletes the <code>.part</code> ("didn't download correctly … so it was deleted"), so the next run starts it afresh. The setting isn't changed until a file checks out.</td></tr>
+  <tr><td>The Angler stops mid-job</td><td>Nothing; the threads die with it.</td><td>Finished posts are kept. At the next start, the shift row becomes <code>interrupted</code> and a cut-off vision read is queued again (<code>_recover</code>).</td></tr>
+  <tr><td>A second Angler starts on the same data folder, or on a port that is taken</td><td>"Another Angler is already running on …; this one exits without touching it", or "Can't listen on host:port …", in its console or <code>data/angler.log</code>. It exits with status 1. If <code>pcapp</code> started it, the window shows the log's path.</td><td>Nothing: it stops before opening the database.</td></tr>
+  <tr><td><code>baitbook stop</code> while a job runs</td><td>"The Angler is busy (…). <code>baitbook stop --force</code> stops it anyway", and status 1.</td><td>Nothing. With <code>--force</code>, as for an Angler stopped mid-job.</td></tr>
+  <tr><td>Someone guesses pairing codes</td><td>"5 wrong pairing codes in a row: the code was changed and pairing paused for a minute" in the journal; the new code in the console.</td><td>A new code; tokens already paired are untouched.</td></tr>
+  <tr><td>A phone gets a 401 when docking</td><td>"This phone needs pairing again", then the pair screen.</td><td>Its posts and queued votes stay on the phone.</td></tr>
+</table>
+
+<!-- ============================================================ glossary -->
+<h2 id="glossary">Glossary</h2>
+<table>
+  <tr><td><b>Angler</b></td><td>The engine: <code>angler/</code>, one Python process with the API, the worker and the scheduler. It does the fishing; the phone brings the catch home.</td></tr>
+  <tr><td><b>baitbook, baitbook-app</b></td><td>The command (<code>baitbook/cli.py</code>): the PC app by default, or <code>angler</code>, <code>stop</code>, <code>status</code>, <code>phone</code>, <code>setup</code>, <code>comfyui</code>, <code>models</code> and <code>shortcut</code>. <code>baitbook-app</code> is the PC app with no console, which the app icons open.</td></tr>
+  <tr><td><b>home folder</b></td><td>The user's own folder for <code>baitbook.toml</code> and <code>data/</code>, outside the install (<code>config.HOME</code>; <a href="#home">section 14</a>), and for <code>comfyui/</code> and <code>models/</code> once they are set up. <code>BAITBOOK_HOME</code> moves it.</td></tr>
+  <tr><td><b>baitbook's own ComfyUI, comfy_base</b></td><td>The ComfyUI <code>baitbook comfyui</code> installs in <code>comfyui/</code> in the home folder, with PyTorch for the GPU (<a href="#own-comfy">section 11</a>). <code>[image] comfy_base</code> is its <code>--base-directory</code>: models, custom nodes and outputs live there, beside the code, so an upgrade swaps only the code. With it set, the Angler only uses a ComfyUI started with it.</td></tr>
+  <tr><td><b>baitbook models</b></td><td>Downloads the default models from Hugging Face, each pinned and checked by its sha256, resuming a <code>.part</code> where it stopped (<a href="#get-models">section 11</a>). It never replaces a model the user chose.</td></tr>
+  <tr><td><b>resident</b></td><td>A made-up user the owner creates from a name, a handle, a bio and 5 images. Every post belongs to one.</td></tr>
+  <tr><td><b>seed, seed post</b></td><td>One of a resident's starting images, stored as a post with <code>kind = 'seed'</code> and night 0. The root of every edit chain; never voted on.</td></tr>
+  <tr><td><b>base prompt</b></td><td>The prompt the vision read wrote for a seed, without its watermarks or dates. Rewritten only by a re-read, and sent with every night's context, it is what keeps a resident pinned to their original images.</td></tr>
+  <tr><td><b>mood tags</b></td><td>3 to 5 words for all of a resident's seeds, from the last turn of the vision read. The owner can edit them. They become hashtags on posts and are part of the resident's voice in the night's context.</td></tr>
+  <tr><td><b>vision read</b></td><td>A <code>read</code> job: one conversation that shows the language model each seed image and gets back a base prompt, then the mood tags.</td></tr>
+  <tr><td><b>night shift</b></td><td>A <code>shift</code> job: phase 1, the language model writes an edit prompt and a caption for every new post; phase 2, the image model makes every edit.</td></tr>
+  <tr><td><b>source, edit</b></td><td>The older image a post was made from (<code>source_id</code>), and the post made from it. Every non-seed post is an edit.</td></tr>
+  <tr><td><b>edit chain, lineage</b></td><td>A post's sources back to its seed (<code>db.chain</code>); with everything grown from it too, its lineage in the Reef.</td></tr>
+  <tr><td><b>bite, throw back</b></td><td>An upvote (<code>vote = 1</code>) and a downvote (<code>vote = −1</code>). A throw-back is never a source again and leaves the phone at the next dock.</td></tr>
+  <tr><td><b>snag</b></td><td>The third verdict: a broken render (wrong anatomy, garbled detail). Out of every feed at once, never a source or an example, and its image files are deleted at the next night shift. Something on the hook that isn't a fish.</td></tr>
+  <tr><td><b>snag rate</b></td><td>Snags ÷ every edit made, overall, per resident and per night: how often the image model breaks a render. The bite rate is the owner's taste; the snag rate is the model's reliability.</td></tr>
+  <tr><td><b>variation, directions</b></td><td>How far a night's edits move from their sources (<code>[shift] variation</code>: subtle, bold, wild), and the things an edit is told to change: the place, the moment, the camera and so on.</td></tr>
+  <tr><td><b>good and bad examples</b></td><td>The random bites and throw-backs (up to 5 and 3 by default) whose prompts go into a resident's context each night (<code>Engine.context</code>).</td></tr>
+  <tr><td><b>catch</b></td><td>The posts a dock brings down to the phone.</td></tr>
+  <tr><td><b>dock</b></td><td>The phone's one-request sync: queued votes up, new posts down, old ones dropped (<code>POST /api/dock</code>).</td></tr>
+  <tr><td><b>keep_nights</b></td><td>How far back a dock reaches: <code>[device] keep_nights</code> × 24 hours (7 by default).</td></tr>
+  <tr><td><b>pairing code, token</b></td><td>The 6 digits that let a phone or another PC pair, new at each start and after 5 wrong tries; and the secret it gets in return and sends with every request.</td></tr>
+  <tr><td><b>owner, device</b></td><td>The two kinds of caller. The owner is this machine, or a PC app paired with <code>role: "owner"</code>, and may do everything. A device is a paired phone: it can read, vote and dock.</td></tr>
+  <tr><td><b>catch-up</b></td><td>Running a scheduled shift late, when the PC slept through its time or the Angler was off, if it is still within <code>[shift] catch_up_hours</code>.</td></tr>
+  <tr><td><b>interrupted</b></td><td>A shift that was still running when the Angler stopped, as marked at the next start.</td></tr>
+  <tr><td><b>the Reef</b></td><td>A resident's edit graph drawn as coral, seeds on the seabed (<code>web/shared/reef.js</code>).</td></tr>
+  <tr><td><b>the series rule</b></td><td>The two models never hold the GPU at the same time: ComfyUI is stopped before the language model loads, and the language model is unloaded before ComfyUI starts.</td></tr>
+  <tr><td><b>primer</b></td><td>The note on how to write prompts for the image model, sent at the top of every conversation: <code>KLEIN_PRIMER</code>, or the file in <code>[image] primer_file</code>.</td></tr>
+  <tr><td><b>FLUX.2 [klein] 4B, distilled</b></td><td>The image model: a 4B rectified-flow transformer that can edit from reference images, under Apache 2.0. The distilled weights need only about 4 steps at cfg 1. klein 9B works too, under a non-commercial licence, as safetensors or GGUF files.</td></tr>
+  <tr><td><b>i2i, ReferenceLatent</b></td><td>Image-to-image: every post starts from an older image. Here the source is encoded and passed to the model as a reference (the <code>ReferenceLatent</code> node), and the new image is generated from fresh noise while following it.</td></tr>
+  <tr><td><b>ComfyUI</b></td><td>The node-graph image tool the Angler drives over HTTP to run klein: baitbook's own, or one the user already has. The Angler starts it and stops it.</td></tr>
+  <tr><td><b>GGUF</b></td><td>The quantised model file format of llama.cpp. The language model and its mmproj are GGUF files. klein's default files are safetensors, but GGUF ones load too, through ComfyUI-GGUF (which <code>baitbook comfyui</code> adds when the config names one).</td></tr>
+  <tr><td><b>mmproj</b></td><td>The multimodal projector: a second GGUF that turns an image into tokens the language model can read. Without it, the model cannot see.</td></tr>
+  <tr><td><b>QAT, Q4_0</b></td><td>Quantisation-aware training, and the 4-bit llama.cpp format Google's 31B QAT model is stored in (17.7 GB).</td></tr>
+  <tr><td><b>SWA, swa_full</b></td><td>Sliding-window attention: most of Gemma's layers only look at a recent window. With <code>swa_full = false</code>, llama.cpp keeps only that window in their KV cache.</td></tr>
+  <tr><td><b>KV cache</b></td><td>The language model's memory of the conversation so far, held on the GPU.</td></tr>
+  <tr><td><b>stem</b></td><td>The 16-hex-digit name of a post's image; the files are <code>stem.png</code>, <code>stem.jpg</code> and <code>stem_t.jpg</code>.</td></tr>
+  <tr><td><b>journal</b></td><td>The <code>events</code> table, shown as the Angler's journal on the Night shift tab.</td></tr>
+  <tr><td><b>PWA, service worker</b></td><td>A web app that can be installed and run offline; the script (<code>sw.js</code>) that keeps its files on the phone.</td></tr>
+</table>
+<p style="color:var(--muted);font-size:13px;margin-top:40px">Written from the code as of baitbook's own ComfyUI and the model downloads (<code>baitbook comfyui</code>, <code>baitbook models</code>), the <code>baitbook</code> command, the installers, the home folder, klein 4B as the default and the automated tests, after the third round (snags and the 5 good / 3 bad examples), edit variation, the watermark rule, owner pairing and the reliability fixes (October 2026). If a box here disagrees with the code, the code wins: the file and function names are there so you can check.</p>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,63 @@
+/* PC app layout. Colours, cards, chips, posts and the reef come from /shared/theme.css. */
+.topbar { gap: var(--s-4); }
+.topbar .viewswitch { flex-wrap: wrap; }
+#engine-pill { flex-shrink: 0; display: flex; gap: var(--s-2); }
+.pc-main { position: relative; z-index: 1; max-width: 1360px; margin: 0 auto; padding: var(--s-7) var(--s-7) calc(2 * var(--s-8)); }
+
+/* feed: one centered column plus a sidebar */
+.feed-layout { display: grid; grid-template-columns: minmax(0, 600px) 340px; gap: var(--s-8); justify-content: center; align-items: start; }
+.feed-side { position: sticky; top: 86px; max-height: calc(100vh - 86px - var(--s-7)); display: flex; flex-direction: column; gap: var(--s-4); }
+/* the residents card takes the height that's left and scrolls on its own, so a long list never waits on the feed */
+.feed-side .side-res { min-height: 0; display: flex; flex-direction: column; }
+.feed-side .res-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 calc(-1 * var(--s-1)); padding: var(--s-1); }  /* room for focus rings */
+.feed-side .res-row { width: 100%; margin-bottom: var(--s-2); }
+.feed-side .res-row img { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; }
+@media (max-width: 1000px) { .feed-layout { grid-template-columns: 1fr; } .feed-side { position: static; max-height: none; } }
+.pc-post { background: var(--paper); border: 1px solid var(--linen); border-radius: var(--r-lg); padding: var(--s-2) 0 var(--s-5); margin-bottom: var(--s-6); box-shadow: var(--shadow-1); }
+.pc-post .frame img.art { aspect-ratio: 1 / 1; }
+.pc-post .ava { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; box-shadow: 0 0 0 2px var(--paper), 0 0 0 3.5px var(--sand); }
+.pc-post .vote { font-size: var(--fs-small); }
+.batch-head { border-top: 0; padding: var(--s-5) var(--s-2) var(--s-3); }
+
+/* residents */
+.res-card .top img { object-fit: cover; }
+.res-card .top .linkish { margin-left: auto; align-self: flex-start; }
+.resform { margin-bottom: var(--s-3); }
+.resform .hint { margin: 0; }
+.edit-actions { display: flex; gap: var(--s-2); }
+.focus-card { box-shadow: 0 0 0 3px var(--ink), var(--shadow-2); }
+.tagform { display: flex; gap: var(--s-2); margin-top: var(--s-2); }
+.tagform input { flex: 1; border: 1.5px solid var(--sand); border-radius: var(--r-sm); padding: var(--s-2) var(--s-3); background: var(--paper); font: 600 var(--fs-small) var(--sans); color: var(--ink); }
+.drop { position: relative; display: block; border: 2px dashed var(--oat); border-radius: var(--r-md); padding: var(--s-4); cursor: pointer; text-transform: none !important; letter-spacing: 0 !important; }
+.drop:hover { border-color: var(--latte); }
+.drop:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 2px; }  /* its file input is hidden: the ring goes here */
+.drop-hint { display: block; margin: var(--s-2) 0 var(--s-3); font-size: var(--fs-small); color: var(--muted); font-weight: 600; }
+.drop .picker { grid-template-columns: repeat(5, 1fr); }
+.read img { object-fit: cover; }
+
+/* night shift */
+.sched { display: flex; align-items: center; gap: var(--s-3); margin: var(--s-4) 0 var(--s-1); font-weight: 600; font-size: var(--fs-small); }
+.sched input[type="time"], .sched input[type="number"], .sched select { border: 1.5px solid var(--sand); border-radius: var(--r-sm); padding: var(--s-2) var(--s-3); font: 700 var(--fs-small) var(--sans); background: var(--paper); color: var(--ink); }
+.sched input[type="number"] { width: 64px; }
+.sched input:disabled { opacity: .5; }
+.sched .hint-inline { font-size: var(--fs-meta); }
+.switch { position: relative; width: 44px; height: 26px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; border-radius: var(--r-pill); background: var(--sand); transition: var(--t-quick); cursor: pointer; }
+.switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--paper); box-shadow: 0 1px 3px rgba(0, 0, 0, .2); transition: var(--t-quick); }
+.switch input:checked + span { background: var(--sage-deep); }
+.switch input:checked + span::after { transform: translateX(18px); }
+.switch input:focus-visible + span { outline: 2px solid var(--ink); outline-offset: 2px; }
+.pipe { max-height: 640px; }
+.job .thumbbox img { width: 100%; height: 100%; object-fit: cover; }
+
+/* memory, ledger, settings */
+.tpl.tall { max-height: 420px; }
+.fav img { object-fit: cover; }
+.hint-inline { text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--cocoa); }
+.models-form label { margin-bottom: 2px; }
+.models-form input { font: var(--fs-meta) var(--mono) !important; }
+.pair { display: grid; grid-template-columns: auto 1fr; gap: var(--s-4); align-items: start; }
+.pair .code { font: 500 var(--fs-display) var(--mono); letter-spacing: .12em; background: var(--linen); border-radius: var(--r-md); padding: var(--s-3) var(--s-4); }
+.pair code { font: var(--fs-meta) var(--mono); }
+.reef-card img.art { aspect-ratio: 1 / 1; }

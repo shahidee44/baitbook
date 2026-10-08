@@ -1,0 +1,46 @@
+# your settings: copied from baitbook.example.toml on the first run, then written by the PC app
+baitbook.toml
+
+# run-time data: the database, images, logs, the PC app window's storage
+data/
+
+# model weights, wherever they end up
+*.gguf
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# HTTPS certificates and keys for the phone app
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# logs and secrets
+*.log
+.env
+.env.*
+
+# editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

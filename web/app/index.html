@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>baitbook</title>
+<link rel="stylesheet" href="/shared/fonts/fonts.css">
+<link rel="stylesheet" href="/shared/theme.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <span class="wordmark">bait<i>book</i></span>
+  </div>
+  <nav class="viewswitch" id="nav"></nav>
+  <div id="engine-pill"></div>
+</header>
+<main id="view" class="pc-main"></main>
+<div class="toast" id="toast"></div>
+<script src="/shared/api.js"></script>
+<script src="/shared/reef.js"></script>
+<script src="core.js"></script>
+<script src="views-feed.js"></script>
+<script src="views-residents.js"></script>
+<script src="views-shift.js"></script>
+<script src="views-memory.js"></script>
+<script src="views-reef.js"></script>
+<script src="views-settings.js"></script>
+<script>BB.app.start();</script>
+</body>
+</html>
